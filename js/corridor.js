@@ -66,7 +66,7 @@
 
     this.runIdx = 0;
     this.along = 0;
-    this.yaw = this.runs[0].dir * (Math.PI / 2);
+    this.yaw = this.headingFor(this.runs[0]);
     this.turning = false;
     this.turnT = 0;
     this.turnFrom = this.yaw;
@@ -181,7 +181,7 @@
         this.turning = false;
         this.runIdx = (this.runIdx + 1) % this.runs.length;
         this.along = 0;
-        this.yaw = this.runs[this.runIdx].dir * (Math.PI / 2);
+        this.yaw = this.headingFor(this.runs[this.runIdx]);
       }
       return;
     }
@@ -193,8 +193,23 @@
       this.turning = true;
       this.turnT = 0;
       this.turnFrom = this.yaw;
-      this.turnTo = next.dir * (Math.PI / 2);
+      this.turnTo = this.headingFor(next);
     }
+  };
+
+  /* THE CAMERA FACES BACKWARDS.
+   *
+   * It runs ahead of the boy and looks at him, so it travels along the run
+   * but faces the way it came. Features it can see therefore get FURTHER
+   * away every frame and shrink toward the vanishing point - the hallway
+   * recedes.
+   *
+   * Facing the direction of travel instead makes walls sweep out past the
+   * viewer, which is a camera chasing him from behind, and reads as the boy
+   * running backwards. That is the bug this exists to prevent; it has come
+   * back twice. */
+  Corridor.prototype.headingFor = function (run) {
+    return ((run.dir + 2) % 4) * (Math.PI / 2);
   };
 
   Corridor.prototype.cameraPos = function () {
@@ -279,14 +294,15 @@
     var pts = this.points;
 
     var run = this.runs[this.runIdx];
-    /* Two points back: at a vertex the camera is standing ON the last point,
-     * and a slice needs a NEARER neighbour to pair with or nothing draws.
-     * Anything actually behind the camera is dropped by the near clip. */
-    var startIdx = run.startPoint + Math.max(0, Math.floor(this.along / SEG_LEN) - 2);
+    /* Looking back down the run, so the points in view are the ones with a
+     * LOWER index: walk down the array, not up. Start one point past the
+     * camera so the nearest slice still has a partner to pair with; that one
+     * is behind the view and the near clip removes it. */
+    var startIdx = run.startPoint + Math.min(run.len, Math.floor(this.along / SEG_LEN) + 1);
 
     var frames = [];
     for (var n = 0; n < DRAW_DIST; n++) {
-      var pi = (startIdx + n) % pts.length;
+      var pi = ((startIdx - n) % pts.length + pts.length) % pts.length;
       var P = pts[pi];
       var d = DIR4[P.dir];
       /* wall lines either side of the centre, perpendicular to the run */
@@ -392,8 +408,10 @@
         var fn = HAUNT.FEATURES[ft.kind];
         if (fn) {
           var isL = ft.side === 'left';
-          fn(g, isL ? nr.L.x : nr.R.x, isL ? f.L.x : f.R.x,
-            nr.ys, f.ys, fog, t, ft.phase, ft.side);
+          var wnx = isL ? nr.L.x : nr.R.x, wfx = isL ? f.L.x : f.R.x;
+          /* screen side, not world side - see the note on furniture below */
+          fn(g, wnx, wfx, nr.ys, f.ys, fog, t, ft.phase,
+            wnx < nr.C.x ? 'left' : 'right');
         }
       }
 
@@ -403,12 +421,20 @@
         var piece = SB.FURNITURE.PIECES[fu.kind];
         if (piece) {
           var l2 = fu.side === 'left';
+          var pnx = fu.centre ? nr.C.x : (l2 ? nr.L.x : nr.R.x);
+          var pfx = fu.centre ? f.C.x : (l2 ? f.L.x : f.R.x);
+          /* INWARD COMES FROM THE PROJECTION, NOT THE LABEL.
+           * fu.side is fixed when the track is built and describes world
+           * space. Which side of the SCREEN that wall lands on depends on
+           * which way the camera faces, so a hard-coded +1/-1 silently
+           * inverts the moment the facing changes and every piece of
+           * furniture gets pushed into the wall instead of into the room.
+           * Taking the sign from the projected centre cannot go wrong. */
           piece(g, {
-            nx: fu.centre ? nr.C.x : (l2 ? nr.L.x : nr.R.x),
-            fx: fu.centre ? f.C.x : (l2 ? f.L.x : f.R.x),
+            nx: pnx, fx: pfx,
             nF: nr.C, fF: f.C,
             nw: nr.w, fog: fog, t: t, phase: fu.phase,
-            inward: l2 ? 1 : -1,
+            inward: nr.C.x >= pnx ? 1 : -1,
             centreX: nr.C.x
           });
         }
@@ -418,10 +444,7 @@
        * into if you missed the turn. With real geometry this is just the
        * cross-section at the run's last point, and the camera pivot sweeps it
        * out of frame instead of it vanishing sideways. */
-      if (f.P.isEnd) {
-        this.junction(g, f.P, this.runs[(f.P.run + 1) % this.runs.length].dir,
-          cam, sinY, cosY, W, H, fog, band);
-      }
+      if (f.P.i === 0) this.junctionAt(g, f.P, cam, sinY, cosY, W, H, fog, band);
 
       /* dark ceiling line */
       g.strokeStyle = 'rgba(8,6,14,' + (0.5 * fog) + ')';
@@ -436,9 +459,9 @@
      * everything. This is what fills the frame during a pivot. */
     for (var jn = Math.min(3, frames.length - 1); jn >= 0; jn--) {
       var jf = frames[jn];
-      if (!jf || !jf.P.isEnd) continue;
-      this.junction(g, jf.P, this.runs[(jf.P.run + 1) % this.runs.length].dir,
-        cam, sinY, cosY, W, H, Math.pow(1 - (jf.n / DRAW_DIST), 1.7), jf.P.band);
+      if (!jf || jf.P.i !== 0) continue;
+      this.junctionAt(g, jf.P, cam, sinY, cosY, W, H,
+        Math.pow(1 - (jf.n / DRAW_DIST), 1.7), jf.P.band);
     }
 
     for (var k = frames.length - 1; k >= 0; k--) {
@@ -458,6 +481,14 @@
    * turn. Modelling the two solid sides is what fixes that properly, rather
    * than stretching a fake wall across the frame.
    */
+  /* The junction at a run start joins the PREVIOUS run to this one. Arriving
+   * along the previous run's direction, leaving along this one's. */
+  Corridor.prototype.junctionAt = function (g, P, cam, sinY, cosY, W, H, fog, band) {
+    var prev = this.runs[(P.run - 1 + this.runs.length) % this.runs.length];
+    this.junction(g, { x: P.x, z: P.z, dir: prev.dir }, P.dir,
+      cam, sinY, cosY, W, H, fog, band);
+  };
+
   Corridor.prototype.junction = function (g, P, nextDir, cam, sinY, cosY, W, H, fog, band) {
     var HAUNT = SB.HAUNTED;
     var A = DIR4[P.dir];
