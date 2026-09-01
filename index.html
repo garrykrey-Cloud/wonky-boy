@@ -58,7 +58,6 @@
 
   <div id="chips"></div>
 
-  <div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
 
   <div id="toast">
     <div class="toast-dot"></div>
@@ -90,6 +89,11 @@
     </div>
   </div>
 </div>
+
+<!-- Banner lives OUTSIDE #playUi: it is used during play ("SHIELD POPPED")
+     and on the title screen ("Press back again to exit"), and #playUi is
+     hidden whenever the game is not running. -->
+<div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
 
 <!-- ============================== title =============================== -->
 <div id="title" class="screen show">

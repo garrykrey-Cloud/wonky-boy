@@ -239,7 +239,8 @@ html, body {
 
 #banner {
   position: fixed;
-  z-index: 9;
+  /* above .screen (12) so the exit warning is visible on the title card */
+  z-index: 14;
   left: 50%; top: 34%;
   transform: translate(-50%, -50%) scale(0.9);
   text-align: center;
