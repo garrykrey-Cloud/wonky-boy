@@ -105,18 +105,18 @@
 
   Splash.prototype.backdrop = function (g, W, H, vx, vy, t) {
     var sky = g.createLinearGradient(0, 0, 0, H);
-    sky.addColorStop(0, 'hsl(258,58%,13%)');
-    sky.addColorStop(0.45, 'hsl(272,54%,18%)');
-    sky.addColorStop(1, 'hsl(232,58%,9%)');
+    sky.addColorStop(0, 'hsl(224,30%,9%)');
+    sky.addColorStop(0.45, 'hsl(230,26%,11%)');
+    sky.addColorStop(1, 'hsl(20,22%,7%)');
     g.fillStyle = sky;
     g.fillRect(0, 0, W, H);
 
     /* a hot glow behind him, cycling colour so it never looks static */
     var glow = g.createRadialGradient(vx, vy, 0, vx, vy, Math.max(W, H) * 0.62);
-    var hue = (t * 26) % 360;
-    glow.addColorStop(0, 'hsla(' + hue + ',95%,62%,0.20)');
-    glow.addColorStop(0.4, 'hsla(' + ((hue + 60) % 360) + ',90%,55%,0.07)');
-    glow.addColorStop(1, 'hsla(280,80%,40%,0)');
+    var hue = 34;   // steady candle amber, not a disco
+    glow.addColorStop(0, 'hsla(' + hue + ',90%,58%,0.13)');
+    glow.addColorStop(0.4, 'hsla(' + hue + ',80%,45%,0.05)');
+    glow.addColorStop(1, 'hsla(30,60%,30%,0)');
     g.fillStyle = glow;
     g.fillRect(0, 0, W, H);
   };

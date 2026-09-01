@@ -63,7 +63,8 @@
         curve: curve,
         /* alternating bands give the sense of speed */
         band: Math.floor(n / 3) % 2,
-        hazard: null
+        hazard: null,
+        feature: null
       };
       self.segments.push(seg);
     }
@@ -102,6 +103,25 @@
 
       addRoad(3, rint(rng, 8, 12), 3, dir * CORNER);   // the corner itself
       addRoad(4, rint(rng, 26, 44), 4, 0);             // ~2s straight after it
+    }
+
+    /* Dress the walls: portraits, sconces, boarded windows, doors, cobwebs
+     * and cracks, alternating sides so the corridor is never bare on both. */
+    var HAUNT = SB.HAUNTED;
+    if (HAUNT) {
+      var fside = 'left';
+      var fat = rint(rng, 3, 8);
+      while (fat < this.segments.length - 2) {
+        this.segments[fat].feature = {
+          kind: HAUNT.FEATURE_BAG[rint(rng, 0, HAUNT.FEATURE_BAG.length - 1)],
+          side: fside,
+          phase: rnd(rng) * Math.PI * 2
+        };
+        fside = fside === 'left' ? 'right' : 'left';
+        /* Close enough together that something is always in view, far enough
+         * apart that they do not overlap into mush. */
+        fat += rint(rng, 4, 9);
+      }
     }
 
     /* Mount hazards down the corridor. */
@@ -192,12 +212,24 @@
       var ceilPt = project(x, WALL_H, depth, camX, W, H, this.cameraDepth);
       var halfW = floorPt.scale * ROAD_W * W / 2;
 
+      /* Every height the joinery needs, projected once per segment. */
+      var HH = SB.HAUNTED ? SB.HAUNTED.HEIGHTS : null;
+      var ys = HH ? {
+        floor: floorPt.y,
+        skirt: project(x, HH.skirt, depth, camX, W, H, this.cameraDepth).y,
+        dado: project(x, HH.dado, depth, camX, W, H, this.cameraDepth).y,
+        rail: project(x, HH.rail, depth, camX, W, H, this.cameraDepth).y,
+        cornice: project(x, HH.cornice, depth, camX, W, H, this.cameraDepth).y,
+        top: ceilPt.y
+      } : null;
+
       frames.push({
         seg: seg,
         n: n,
         depth: depth,
         fx: floorPt.x, fy: floorPt.y,
         cy: ceilPt.y,
+        ys: ys,
         w: halfW,
         scale: floorPt.scale
       });
@@ -215,68 +247,77 @@
       if (fog <= 0.01) continue;
 
       var band = f.seg.band;
+      var HAUNT = SB.HAUNTED;
 
-      /* floor */
+      /* Detail only where it can actually be seen. Past this the slices are a
+       * few pixels tall and the joinery is invisible, so far segments get one
+       * flat quad each and the frame cost stays flat. */
+      var detail = f.n < 34 && nr.ys && f.ys;
+
+      /* --- floorboards ------------------------------------------------- */
       quad(g,
         nr.fx - nr.w, nr.fy, nr.fx + nr.w, nr.fy,
         f.fx + f.w, f.fy, f.fx - f.w, f.fy,
-        THEME.hue(252, 40, band ? 30 : 38, fog));
+        HAUNT.hsl(band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, fog));
 
-      /* a bright centre strip so turns read clearly */
-      quad(g,
-        nr.fx - nr.w * 0.06, nr.fy, nr.fx + nr.w * 0.06, nr.fy,
-        f.fx + f.w * 0.06, f.fy, f.fx - f.w * 0.06, f.fy,
-        THEME.sig(0.18 * fog));
-
-      /* Walls. The two sides are lit differently so the corridor has a
-       * sense of direction rather than looking like a symmetrical funnel. */
-      quad(g,
-        nr.fx - nr.w, nr.fy, f.fx - f.w, f.fy,
-        f.fx - f.w, f.cy, nr.fx - nr.w, nr.cy,
-        THEME.hue(268, 56, band ? 24 : 31, fog));
-
-      quad(g,
-        nr.fx + nr.w, nr.fy, f.fx + f.w, f.fy,
-        f.fx + f.w, f.cy, nr.fx + nr.w, nr.cy,
-        THEME.hue(222, 56, band ? 29 : 37, fog));
-
-      /* Transverse rungs across the floor - the floor equivalent of the
-       * wall ribs, and the strongest single motion cue in the frame. */
-      if (f.seg.index % 3 === 0) {
-        g.strokeStyle = THEME.sig(0.50 * fog, -6);
-        g.lineWidth = Math.max(1, nr.w * 0.045);
+      if (detail) {
+        /* boards run along the corridor, so they converge on the vanishing
+         * point - the single strongest depth cue on the floor */
+        g.strokeStyle = HAUNT.hsl(HAUNT.PALETTE.joint, 0.8 * fog);
+        g.lineWidth = Math.max(0.5, nr.w * 0.012);
         g.beginPath();
-        g.moveTo(nr.fx - nr.w, nr.fy);
-        g.lineTo(nr.fx + nr.w, nr.fy);
+        for (var bd = -3; bd <= 3; bd++) {
+          var p = bd / 3.5;
+          g.moveTo(nr.fx + nr.w * p, nr.fy);
+          g.lineTo(f.fx + f.w * p, f.fy);
+        }
         g.stroke();
+
+        /* board ends */
+        if (f.seg.index % 4 === 0) {
+          g.strokeStyle = HAUNT.hsl(HAUNT.PALETTE.joint, 0.9 * fog);
+          g.lineWidth = Math.max(0.6, nr.w * 0.02);
+          g.beginPath();
+          g.moveTo(nr.fx - nr.w, nr.fy);
+          g.lineTo(nr.fx + nr.w, nr.fy);
+          g.stroke();
+        }
       }
 
-      /* Vertical ribs where segments meet. These are what actually sell the
-       * forward motion - without them the walls are flat colour and the eye
-       * has nothing to track. */
-      if (f.seg.index % 3 === 0) {
-        g.strokeStyle = THEME.sig(0.34 * fog, -6);
-        g.lineWidth = Math.max(0.6, nr.w * 0.035);
-        g.beginPath();
-        g.moveTo(nr.fx - nr.w, nr.fy); g.lineTo(nr.fx - nr.w, nr.cy);
-        g.moveTo(nr.fx + nr.w, nr.fy); g.lineTo(nr.fx + nr.w, nr.cy);
-        g.stroke();
+      /* --- walls -------------------------------------------------------- */
+      if (detail) {
+        HAUNT.wallSlice(g, nr.fx - nr.w, f.fx - f.w, nr.ys, f.ys, fog, band, 'left', true);
+        HAUNT.wallSlice(g, nr.fx + nr.w, f.fx + f.w, nr.ys, f.ys, fog, band, 'right', true);
+      } else {
+        quad(g,
+          nr.fx - nr.w, nr.fy, f.fx - f.w, f.fy,
+          f.fx - f.w, f.cy, nr.fx - nr.w, nr.cy,
+          HAUNT.hsl(HAUNT.PALETTE.paper, fog, band ? -6 : -3));
+        quad(g,
+          nr.fx + nr.w, nr.fy, f.fx + f.w, f.fy,
+          f.fx + f.w, f.cy, nr.fx + nr.w, nr.cy,
+          HAUNT.hsl(HAUNT.PALETTE.paper, fog, band ? -3 : 0));
       }
 
-      /* signature trim along the top of each wall */
-      g.strokeStyle = THEME.sig(0.42 * fog);
-      g.lineWidth = Math.max(1, nr.w * 0.03);
+      /* --- fittings mounted on this slice ------------------------------- */
+      if (detail && f.seg.feature) {
+        var ft = f.seg.feature;
+        var fn = HAUNT.FEATURES[ft.kind];
+        if (fn) {
+          var isLeft = ft.side === 'left';
+          fn(g,
+            isLeft ? nr.fx - nr.w : nr.fx + nr.w,
+            isLeft ? f.fx - f.w : f.fx + f.w,
+            nr.ys, f.ys, fog, t, ft.phase, ft.side);
+        }
+      }
+
+      /* ceiling line, kept dark so the corridor feels enclosed */
+      g.strokeStyle = 'rgba(8,6,14,' + (0.5 * fog) + ')';
+      g.lineWidth = Math.max(0.8, nr.w * 0.02);
       g.beginPath();
       g.moveTo(nr.fx - nr.w, nr.cy); g.lineTo(f.fx - f.w, f.cy);
       g.moveTo(nr.fx + nr.w, nr.cy); g.lineTo(f.fx + f.w, f.cy);
-      g.stroke();
-
-      /* and a warmer line where each wall meets the floor */
-      g.strokeStyle = THEME.hue(28, 80, 58, 0.22 * fog);
-      g.lineWidth = Math.max(0.8, nr.w * 0.02);
-      g.beginPath();
-      g.moveTo(nr.fx - nr.w, nr.fy); g.lineTo(f.fx - f.w, f.fy);
-      g.moveTo(nr.fx + nr.w, nr.fy); g.lineTo(f.fx + f.w, f.fy);
       g.stroke();
     }
 

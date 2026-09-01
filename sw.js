@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const CACHE = 'wonky-boy-v4';
+const CACHE = 'wonky-boy-v5';
 
 const ASSETS = [
   './',
@@ -20,6 +20,7 @@ const ASSETS = [
   './js/player.js',
   './js/entities.js',
   './js/render.js',
+  './js/haunted.js',
   './js/corridor.js',
   './js/splash.js',
   './js/backbutton.js',
