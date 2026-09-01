@@ -379,6 +379,9 @@
         f.R.x, f.ys.floor, f.L.x, f.ys.floor,
         HAUNT.hsl(band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, fog));
 
+      /* the runner goes down over the boards, leaving a margin of bare wood */
+      if (SB.CARPET) SB.CARPET.draw(g, nr, f, fog, f.P.run * 1000 + f.P.i);
+
       if (detail) {
         g.strokeStyle = HAUNT.hsl(HAUNT.PALETTE.joint, 0.8 * fog);
         g.lineWidth = Math.max(0.5, nr.w * 0.012);

@@ -254,7 +254,8 @@
   function lerp(a, b, p) { return a + (b - a) * p; }
 
   var FEATURES = {
-    portrait: portrait,
+    painting: function () { return global.SB.PAINTINGS.painting.apply(null, arguments); },
+    portrait: function () { return global.SB.PAINTINGS.painting.apply(null, arguments); },
     sconce: sconce,
     door: doorway,
     window: window_,
@@ -264,13 +265,14 @@
 
   /* Weighted so the corridor is mostly wall, with sconces frequent enough to
    * keep it lit and portraits frequent enough to be unnerving. */
+  /* Paintings live in js/paintings.js; registered at load. */
   var FEATURE_BAG = [
-    'sconce', 'sconce', 'sconce',
-    'portrait', 'portrait',
-    'crack', 'crack',
-    'cobweb',
-    'window',
-    'door'
+    "painting", "painting", "painting", "painting", "painting",
+    "sconce", "sconce", "sconce",
+    "crack", "crack",
+    "cobweb",
+    "window",
+    "door"
   ];
 
   global.SB = global.SB || {};
