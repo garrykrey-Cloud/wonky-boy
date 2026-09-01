@@ -78,22 +78,31 @@
 
     function easeIn(p) { return p * p; }
 
-    /* Build a looping run of corridor: mostly straights, punctuated by turns
-     * of varying severity so it reads as a maze rather than a racetrack. */
-    addRoad(8, 20, 8, 0);
-    for (var s = 0; s < 14; s++) {
-      var pick = rnd(rng);
-      if (pick < 0.32) {
-        addRoad(10, rint(rng, 8, 24), 10, 0);                 // straight
-      } else if (pick < 0.66) {
-        addRoad(12, rint(rng, 10, 22), 12, (rnd(rng) < 0.5 ? -1 : 1) * 2.2);
-      } else if (pick < 0.9) {
-        addRoad(8, rint(rng, 6, 14), 8, (rnd(rng) < 0.5 ? -1 : 1) * 4.4);
-      } else {
-        addRoad(6, rint(rng, 4, 9), 6, (rnd(rng) < 0.5 ? -1 : 1) * 6.6);
-      }
+    /* A maze corridor, not a racetrack: run straight for a couple of seconds,
+     * then take a hard corner, forever.
+     *
+     * At SPEED / SEG_LEN the camera covers 26 segments a second, so a ~50
+     * segment straight is very close to two seconds between corners.
+     *
+     * CORNER is deliberately enormous next to an ordinary road curve. The
+     * offset accumulates as roughly curve * n^2 / 2, so over a dozen segments
+     * this throws the corridor centre several corridor-widths sideways - far
+     * enough that the far end swings completely out of view and you are
+     * looking at a wall. That is what sells it as a right-angle turn rather
+     * than a bend. */
+    var CORNER = 40;
+    var lastDir = rnd(rng) < 0.5 ? -1 : 1;
+
+    addRoad(6, 44, 6, 0);                       // opening straight
+    for (var s = 0; s < 16; s++) {
+      /* Favour alternating direction, so it snakes through the maze instead
+       * of spiralling away in one direction. */
+      var dir = rnd(rng) < 0.72 ? -lastDir : lastDir;
+      lastDir = dir;
+
+      addRoad(3, rint(rng, 8, 12), 3, dir * CORNER);   // the corner itself
+      addRoad(4, rint(rng, 26, 44), 4, 0);             // ~2s straight after it
     }
-    addRoad(10, 20, 10, 0);
 
     /* Mount hazards down the corridor. */
     if (pool.length) {
@@ -118,8 +127,21 @@
 
   Corridor.prototype.total = function () { return this.segments.length * SEG_LEN; };
 
+  /* DIRECTION OF TRAVEL - easy to get backwards, and it was.
+   *
+   * He runs TOWARD the camera and the camera retreats ahead of him. Take any
+   * mark on the corridor wall: the camera is moving away from it, so its
+   * depth increases and on screen it shrinks and slides toward the vanishing
+   * point. The hallway RECEDES away from the viewer.
+   *
+   * Adding to the position instead carries the camera forward into the
+   * corridor and sweeps the walls out past the viewer. That is what a camera
+   * chasing him from behind would see, and it makes a forward-facing boy read
+   * as running backwards. Hence the subtraction. */
   Corridor.prototype.advance = function (dt) {
-    this.position = (this.position + SPEED * dt) % this.total();
+    var total = this.total();
+    this.position = (this.position - SPEED * dt) % total;
+    if (this.position < 0) this.position += total;
   };
 
   /* --------------------------------------------------------- projection */
