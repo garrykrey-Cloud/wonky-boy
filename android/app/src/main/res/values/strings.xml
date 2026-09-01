@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Wonky Boy</string>
+    <string name="title_activity_main">Wonky Boy</string>
+    <string name="package_name">com.garry.wonkyboy</string>
+    <string name="custom_url_scheme">com.garry.wonkyboy</string>
+</resources>

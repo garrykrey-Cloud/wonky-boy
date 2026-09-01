@@ -1,0 +1,12 @@
+{
+  "appId": "com.garry.wonkyboy",
+  "appName": "Wonky Boy",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#0b0d24",
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

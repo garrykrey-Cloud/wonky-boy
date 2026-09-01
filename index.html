@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no,maximum-scale=1">
+<meta name="theme-color" content="#0d1030">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Wonky Boy">
+<meta name="description" content="Guide a boy who cannot control his arms and legs through 1000 mazes.">
+<title>Wonky Boy</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ============================== splash =============================== -->
+<div id="splash">
+  <canvas id="splashCanvas"></canvas>
+  <div class="splash-words">
+    <div class="wordmark">
+      <span class="wm wm-shadow" aria-hidden="true">Wonky Boy</span>
+      <span class="wm wm-stroke" aria-hidden="true">Wonky Boy</span>
+      <span class="wm wm-fill">Wonky Boy</span>
+    </div>
+    <div class="byline">by Garry</div>
+  </div>
+  <div class="splash-tap">tap to begin</div>
+</div>
+
+<canvas id="game"></canvas>
+
+<!-- touch surface for the thumb stick -->
+<div id="stickZone"></div>
+<div id="stick"><div id="stickNub"></div></div>
+
+<div id="flash"></div>
+
+<!-- ============================ in-play HUD ============================ -->
+<div id="playUi">
+  <div class="hud-top">
+    <div class="hud-cluster">
+      <div class="stat"><span class="lbl">BOARD</span><span class="val" id="hudBoard">1</span></div>
+      <div class="stat"><span class="lbl">TIME</span><span class="val" id="hudTime">0.00s</span></div>
+      <div class="stat"><span class="lbl">ZAPS</span><span class="val" id="hudDeaths">0</span></div>
+    </div>
+    <button id="pauseBtn" class="icon-btn" aria-label="Pause">II</button>
+  </div>
+
+  <div class="slop-bar">
+    <span class="slop-label">SLOP</span>
+    <div class="slop-track"><div class="slop-fill" id="slopFill"></div></div>
+    <span class="slop-value" id="slopValue">10%</span>
+  </div>
+
+  <div id="chips"></div>
+
+  <div id="banner"><div id="bannerTitle"></div><div id="bannerSub"></div></div>
+
+  <div id="toast">
+    <div class="toast-dot"></div>
+    <div>
+      <div id="toastName"></div>
+      <div id="toastDesc"></div>
+    </div>
+  </div>
+
+  <div id="death">
+    <div class="death-inner">
+      <div class="death-zap">ZAPPED</div>
+      <div class="death-by" id="deathName"></div>
+      <div class="death-note">Back to the start of the board</div>
+    </div>
+  </div>
+
+  <div id="complete">
+    <div class="panel">
+      <h2 id="completeBoard">Board cleared</h2>
+      <div class="big-time" id="completeTime">0.00s</div>
+      <div class="sub" id="completeBest"></div>
+      <button id="nextBtn" class="btn primary">Board 2</button>
+      <div class="row">
+        <button id="replayBtn" class="btn">Again</button>
+        <button id="completeQuit" class="btn">Menu</button>
+      </div>
+      <div class="sub tiny" id="completeNext"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== title =============================== -->
+<div id="title" class="screen show">
+  <div class="panel wide">
+    <div class="logo">
+      <span class="logo-main" id="gameTitle">Wonky Boy</span>
+      <span class="logo-sub">he really is trying his best</span>
+    </div>
+    <p class="blurb">
+      His arms and legs do not take instructions well. Every move you ask for
+      arrives a little bit wrong, and the deeper you go the wronger it gets.
+      1000 mazes. 100 hazards. One very wobbly boy.
+    </p>
+    <button id="playBtn" class="btn primary big">Start wobbling</button>
+    <div class="row">
+      <button id="levelsBtn" class="btn">Boards</button>
+      <button id="codexBtn" class="btn">Hazards</button>
+    </div>
+    <div class="stats-row">
+      <div><span id="titleProgress">Board 1 of 1000</span></div>
+      <div>Hazards met <span id="titleSeen">0 / 100</span></div>
+      <div>Zaps taken <span id="titleDeaths">0</span></div>
+    </div>
+    <div class="row">
+      <button id="variantBtn" class="btn ghost">Wonky Boy</button>
+      <button id="motionBtn" class="btn ghost">Rumble: on</button>
+    </div>
+    <p class="hint">
+      Drag anywhere on the lower screen to steer. Keyboard: arrows or WASD,
+      R to restart, Esc to pause.
+    </p>
+  </div>
+</div>
+
+<!-- ============================== boards ============================== -->
+<div id="levels" class="screen">
+  <div class="panel wide tall">
+    <div class="panel-head">
+      <h2>Boards</h2>
+      <button id="levelsBack" class="btn small">Back</button>
+    </div>
+    <div class="pager">
+      <button id="levelPrev" class="btn small">&lt;</button>
+      <span id="levelPage">1 - 100</span>
+      <button id="levelNext" class="btn small">&gt;</button>
+    </div>
+    <div id="levelGrid" class="level-grid"></div>
+  </div>
+</div>
+
+<!-- ============================== codex =============================== -->
+<div id="codex" class="screen">
+  <div class="panel wide tall">
+    <div class="panel-head">
+      <h2>Hazards <span class="count" id="codexCount">0 of 100 met</span></h2>
+      <button id="codexBack" class="btn small">Back</button>
+    </div>
+    <div id="codexList" class="codex-list"></div>
+  </div>
+</div>
+
+<!-- ============================== pause =============================== -->
+<div id="pause" class="screen">
+  <div class="panel">
+    <h2>Paused</h2>
+    <button id="resumeBtn" class="btn primary big">Resume</button>
+    <div class="row">
+      <button id="retryBtn" class="btn">Restart board</button>
+      <button id="pauseCodex" class="btn">Hazards</button>
+    </div>
+    <button id="quitBtn" class="btn ghost">Main menu</button>
+  </div>
+</div>
+
+<script src="js/theme.js"></script>
+<script src="js/rng.js"></script>
+<script src="js/hazards.js"></script>
+<script src="js/maze.js"></script>
+<script src="js/effects.js"></script>
+<script src="js/player.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/render.js"></script>
+<script src="js/splash.js"></script>
+<script src="js/game.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function () { /* offline install is optional */ });
+  });
+}
+</script>
+</body>
+</html>

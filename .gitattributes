@@ -1,0 +1,18 @@
+# Normalise line endings so the repo stays LF regardless of who checks it out.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF or they will not run.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch binaries.
+*.png binary
+*.jpg binary
+*.jks binary
+*.keystore binary
+*.aab binary
+*.apk binary
+*.jar binary
+
+# The Gradle wrapper script is executed by sh; keep it LF.
+gradlew text eol=lf

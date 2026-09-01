@@ -1,0 +1,121 @@
+apply plugin: 'com.android.application'
+
+/* ---------------------------------------------------------------------------
+ * VERSION - single source of truth is package.json.
+ *
+ * Play rejects any upload whose versionCode is not higher than the previous
+ * one, and a versionCode that drifts from the human-readable version is a good
+ * way to lose track of what is actually live. Both are derived from the same
+ * semver so they cannot disagree:
+ *
+ *     1.2.3  ->  versionName "1.2.3", versionCode 10203
+ *
+ * Bump the version in package.json and nothing else.
+ * ------------------------------------------------------------------------ */
+def pkgVersion = new groovy.json.JsonSlurper()
+        .parseText(rootProject.file("../package.json").text).version
+def semver = pkgVersion.tokenize('.').collect { it.toInteger() }
+def computedVersionCode = semver[0] * 10000 + semver[1] * 100 + semver[2]
+
+/* ---------------------------------------------------------------------------
+ * SIGNING - credentials come from android/keystore.properties, which is kept
+ * out of version control and created by hand (see PLAY-STORE.md).
+ *
+ * When that file is absent the release build simply comes out unsigned, so a
+ * fresh clone and ordinary debug builds keep working with no setup.
+ * ------------------------------------------------------------------------ */
+def keystorePropsFile = rootProject.file("keystore.properties")
+def hasSigning = keystorePropsFile.exists()
+def keystoreProps = new Properties()
+if (hasSigning) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+}
+
+android {
+    namespace = "com.garry.wonkyboy"
+    compileSdk = rootProject.ext.compileSdkVersion
+
+    signingConfigs {
+        release {
+            if (hasSigning) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.garry.wonkyboy"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode computedVersionCode
+        versionName pkgVersion
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    buildTypes {
+        release {
+            if (hasSigning) {
+                signingConfig signingConfigs.release
+            }
+            /* Shrinking matters more than usual here: the app is a WebView
+             * plus a few hundred KB of game, so the Java side is almost all
+             * framework code that can be stripped. */
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            /* Keep debug builds fast and un-shrunk. */
+            minifyEnabled false
+        }
+    }
+
+    /* Play distributes per-device slices from the bundle. */
+    bundle {
+        language { enableSplit = true }
+        density { enableSplit = true }
+        abi { enableSplit = true }
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/versions/**']
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

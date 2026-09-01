@@ -1,0 +1,16 @@
+{
+  "name": "wonky-boy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A phone maze game about a boy who cannot control his arms and legs.",
+  "scripts": {
+    "start": "node tools/serve.js 5178",
+    "icons": "node tools/make-icons.js",
+    "test": "node tools/selftest.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1"
+  }
+}
