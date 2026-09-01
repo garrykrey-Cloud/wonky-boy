@@ -455,7 +455,12 @@
 
   /* ----------------------------------------------------------- screens */
 
+  /* The codex opens from the title AND from the pause menu, so back has to
+   * return to whichever one opened it. */
+  var codexCameFrom = 'title';
+
   function showScreen(name) {
+    if (name === 'codex') codexCameFrom = state.screen === 'pause' ? 'pause' : 'title';
     state.screen = name;
     ['title', 'levels', 'codex', 'pause'].forEach(function (s) {
       el[s].classList.toggle('show', s === name);
@@ -464,6 +469,63 @@
     if (name === 'levels') renderLevels();
     if (name === 'codex') renderCodex();
     if (name === 'title') renderTitleStats();
+  }
+
+  /* --------------------------------------------------- hardware back */
+
+  var exitArmed = 0;
+
+  /* Returns true when the press was consumed, false to let the app close.
+   * Driven by the Android back button, and by the browser back button when
+   * running as a web page. */
+  function handleBack() {
+    /* Overlays sit on top of whatever screen is underneath them. */
+    if (el.complete.classList.contains('show')) {
+      el.complete.classList.remove('show');
+      showScreen('title');
+      return true;
+    }
+    if (el.death.classList.contains('show')) {
+      /* The board is already restarting; swallow it so back cannot fling
+       * the player out of the app mid-death. */
+      return true;
+    }
+
+    var splashNode = document.getElementById('splash');
+    if (splashNode && splashNode.classList.contains('show')) {
+      dismissSplash();
+      return true;
+    }
+
+    switch (state.screen) {
+      case 'play':
+        showScreen('pause');
+        return true;
+      case 'pause':
+        showScreen('play');            // backing out of pause resumes
+        return true;
+      case 'levels':
+        showScreen('title');
+        return true;
+      case 'codex':
+        showScreen(codexCameFrom);
+        return true;
+      case 'title':
+        return !confirmExit();
+      default:
+        showScreen('title');
+        return true;
+    }
+  }
+
+  /* Android convention: one press warns, a second within the window leaves.
+   * Returns true when the app should actually close. */
+  function confirmExit() {
+    var now = Date.now();
+    if (exitArmed && now - exitArmed < 2000) return true;
+    exitArmed = now;
+    showBanner('Press back again to exit', 'Your progress is saved.');
+    return false;
   }
 
   function togglePause() {
@@ -659,6 +721,7 @@
     bindInput();
     bindUi();
     document.getElementById('gameTitle').textContent = THEME.current.name;
+    if (SB.BACK) SB.BACK.init(handleBack);
     startSplash();
     global.requestAnimationFrame(function (t) { lastT = t; global.requestAnimationFrame(frame); });
 
@@ -677,6 +740,9 @@
      * window - see tools/shoot.js */
     get renderer() { return renderer; },
     showScreen: function (n) { showScreen(n); },
+    /* the hardware back handler, exposed so it can be exercised without a
+     * physical device - returns true when it swallowed the press */
+    handleBack: function () { return handleBack(); },
     step: function (raw, forcedInput) {
       if (forcedInput) { input.x = forcedInput.x; input.y = forcedInput.y; forceInput = true; }
       tick(raw === undefined ? 1 / 60 : raw);
