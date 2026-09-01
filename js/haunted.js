@@ -18,10 +18,10 @@
   'use strict';
 
   /* Heights in world units, measured up the wall from the floor. */
-  var H_SKIRT = 130;
-  var H_DADO = 505;
-  var H_RAIL = 570;
-  var H_CORNICE = 1240;
+  var H_SKIRT = 150;
+  var H_DADO = 560;
+  var H_RAIL = 640;
+  var H_CORNICE = 1900;
 
   var PALETTE = {
     floor: [26, 32, 22],

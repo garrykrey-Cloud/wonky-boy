@@ -24,8 +24,8 @@
   /* World units. Tuned so a phone-shaped viewport frames the corridor with
    * the boy comfortably inside it. */
   var SEG_LEN = 200;
-  var ROAD_W = 520;       // half-width of the corridor floor - narrow reads as a hallway
-  var WALL_H = 1500;      // how tall the side walls stand
+  var ROAD_W = 430;       // half-width of the corridor floor - narrow reads as a hallway
+  var WALL_H = 2250;      // how tall the side walls stand
   var CAM_H = 620;        // camera height above the floor
   var DRAW_DIST = 90;     // segments rendered; the rest is fog
   var FOV = 100;
@@ -64,7 +64,8 @@
         /* alternating bands give the sense of speed */
         band: Math.floor(n / 3) % 2,
         hazard: null,
-        feature: null
+        feature: null,
+        furn: null
       };
       self.segments.push(seg);
     }
@@ -92,16 +93,16 @@
      * looking at a wall. That is what sells it as a right-angle turn rather
      * than a bend. */
     var CORNER = 40;
-    var lastDir = rnd(rng) < 0.5 ? -1 : 1;
 
+    /* Every corner is the SAME shape - fixed ease and fixed hold - so every
+     * one turns through the same angle. Varying the hold length would make
+     * some corners 60 degrees and others 120. Only the direction is random,
+     * and it is a straight coin flip with no memory, so the corridor wanders
+     * genuinely rather than politely zig-zagging. */
     addRoad(6, 44, 6, 0);                       // opening straight
     for (var s = 0; s < 16; s++) {
-      /* Favour alternating direction, so it snakes through the maze instead
-       * of spiralling away in one direction. */
-      var dir = rnd(rng) < 0.72 ? -lastDir : lastDir;
-      lastDir = dir;
-
-      addRoad(3, rint(rng, 8, 12), 3, dir * CORNER);   // the corner itself
+      var dir = rnd(rng) < 0.5 ? -1 : 1;
+      addRoad(3, 10, 3, dir * CORNER);                 // the corner, always 90
       addRoad(4, rint(rng, 26, 44), 4, 0);             // ~2s straight after it
     }
 
@@ -121,6 +122,24 @@
         /* Close enough together that something is always in view, far enough
          * apart that they do not overlap into mush. */
         fat += rint(rng, 4, 9);
+      }
+    }
+
+    /* Furnish it: armour, bookcases, tables, chairs, clocks, fireplaces,
+     * draped windows against the walls, chandeliers down the middle. */
+    var FURN = SB.FURNITURE;
+    if (FURN) {
+      var uat = rint(rng, 5, 11);
+      while (uat < this.segments.length - 3) {
+        var kind = FURN.BAG[rint(rng, 0, FURN.BAG.length - 1)];
+        this.segments[uat].furn = {
+          kind: kind,
+          side: rnd(rng) < 0.5 ? 'left' : 'right',
+          centre: !!FURN.CENTRE_PIECES[kind],
+          phase: rnd(rng) * Math.PI * 2
+        };
+        /* Spaced so pieces do not intersect each other down the hall. */
+        uat += rint(rng, 7, 15);
       }
     }
 
@@ -173,7 +192,12 @@
       x: W / 2 + scale * (worldX - camX) * W / 2,
       /* HORIZON rather than H/2: on a tall phone a centred vanishing point
        * leaves a huge dead wedge of floor across the bottom half. */
-      y: H * HORIZON - scale * (worldY - CAM_H) * H / 2,
+      /* W/2 on BOTH axes, deliberately. The textbook road formula uses H/2
+       * here, which is fine on a 4:3 screen but on a 390x800 phone stretches
+       * the world about 2x vertically - the corridor became a canyon and a
+       * suit of armour came out as a thin sliver. Uniform scale keeps real
+       * world proportions. */
+      y: H * HORIZON - scale * (worldY - CAM_H) * W / 2,
       scale: scale
     };
   }
@@ -223,6 +247,11 @@
         top: ceilPt.y
       } : null;
 
+      /* Screen y for ANY world height, without another projection call.
+       *   y(h) = H*HORIZON - scale*(h - CAM_H)*H/2
+       *        = A - B*h
+       * Furniture needs arbitrary heights - a chair back, a bookcase top -
+       * so every frame carries the two constants instead of a closure. */
       frames.push({
         seg: seg,
         n: n,
@@ -231,7 +260,9 @@
         cy: ceilPt.y,
         ys: ys,
         w: halfW,
-        scale: floorPt.scale
+        scale: floorPt.scale,
+        yA: H * HORIZON + floorPt.scale * CAM_H * W / 2,
+        yB: floorPt.scale * W / 2
       });
 
       x += dx;
@@ -309,6 +340,30 @@
             isLeft ? nr.fx - nr.w : nr.fx + nr.w,
             isLeft ? f.fx - f.w : f.fx + f.w,
             nr.ys, f.ys, fog, t, ft.phase, ft.side);
+        }
+      }
+
+      /* --- furniture standing on the floor ------------------------------
+       * Culled close in for the same reason as the hazards: a bookcase two
+       * segments from the lens is a featureless slab filling half the frame,
+       * because everything that identifies it is off the edge of the screen.
+       * Let them pass by unseen instead. */
+      if (detail && f.n >= 6 && f.seg.furn && SB.FURNITURE) {
+        var fu = f.seg.furn;
+        var piece = SB.FURNITURE.PIECES[fu.kind];
+        if (piece) {
+          var isL = fu.side === 'left';
+          piece(g, {
+            nx: fu.centre ? nr.fx : (isL ? nr.fx - nr.w : nr.fx + nr.w),
+            fx: fu.centre ? f.fx : (isL ? f.fx - f.w : f.fx + f.w),
+            nF: nr, fF: f,
+            nw: nr.w,
+            fog: fog,
+            t: t,
+            phase: fu.phase,
+            inward: isL ? 1 : -1,
+            centreX: nr.fx
+          });
         }
       }
 
