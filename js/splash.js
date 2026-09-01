@@ -25,8 +25,16 @@
     this.running = false;
     this.last = 0;
     this.puffs = [];
+
+    /* The corridor he is running through. Seeded on the clock so the layout
+     * of turns and hazards differs every launch. */
+    this.corridor = SB.Corridor ? new SB.Corridor('splash-' + Date.now()) : null;
+
+    /* A few streaks still fly past the camera on top of the corridor - they
+     * sell the speed at the edges of the frame where the walls are behind
+     * the viewer. */
     this.lines = [];
-    for (var i = 0; i < 46; i++) {
+    for (var i = 0; i < 22; i++) {
       this.lines.push({
         a: Math.random() * Math.PI * 2,
         d: Math.random(),
@@ -81,8 +89,13 @@
     var vx = W * 0.5, vy = H * 0.42;
 
     this.backdrop(g, W, H, vx, vy, t);
+    if (this.corridor) {
+      this.corridor.advance(dt);
+      this.corridor.draw(g, W, H, t);
+    } else {
+      this.ground(g, W, H, vy, t);      // fallback if corridor.js is absent
+    }
     this.rushLines(g, W, H, vx, vy, dt);
-    this.ground(g, W, H, vy, t);
     this.puffStep(g, dt, W, H, t);
     this.boy(g, W, H, t);
     this.vignette(g, W, H);
@@ -101,8 +114,8 @@
     /* a hot glow behind him, cycling colour so it never looks static */
     var glow = g.createRadialGradient(vx, vy, 0, vx, vy, Math.max(W, H) * 0.62);
     var hue = (t * 26) % 360;
-    glow.addColorStop(0, 'hsla(' + hue + ',95%,62%,0.42)');
-    glow.addColorStop(0.4, 'hsla(' + ((hue + 60) % 360) + ',90%,55%,0.16)');
+    glow.addColorStop(0, 'hsla(' + hue + ',95%,62%,0.20)');
+    glow.addColorStop(0.4, 'hsla(' + ((hue + 60) % 360) + ',90%,55%,0.07)');
     glow.addColorStop(1, 'hsla(280,80%,40%,0)');
     g.fillStyle = glow;
     g.fillRect(0, 0, W, H);
