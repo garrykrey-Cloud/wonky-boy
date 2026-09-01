@@ -65,7 +65,8 @@
         band: Math.floor(n / 3) % 2,
         hazard: null,
         feature: null,
-        furn: null
+        furn: null,
+        corner: 0
       };
       self.segments.push(seg);
     }
@@ -80,30 +81,35 @@
 
     function easeIn(p) { return p * p; }
 
-    /* A maze corridor, not a racetrack: run straight for a couple of seconds,
-     * then take a hard corner, forever.
+    /* CORNERS ARE NOT CURVES.
      *
-     * At SPEED / SEG_LEN the camera covers 26 segments a second, so a ~50
-     * segment straight is very close to two seconds between corners.
+     * `curve` here is the second derivative of the corridor's lateral offset:
+     * each segment adds to a running slope, and that slope adds to the offset.
+     * Spreading a corner across an eased run of segments is precisely what
+     * makes a BEND - the corridor leans over gradually and you can see round
+     * it the entire way. There is no amount of tightening that turns a bend
+     * into a right angle; it is the wrong shape.
      *
-     * CORNER is deliberately enormous next to an ordinary road curve. The
-     * offset accumulates as roughly curve * n^2 / 2, so over a dozen segments
-     * this throws the corridor centre several corridor-widths sideways - far
-     * enough that the far end swings completely out of view and you are
-     * looking at a wall. That is what sells it as a right-angle turn rather
-     * than a bend. */
-    var CORNER = 40;
+     * A right angle is a discontinuity, so it gets exactly ONE segment with a
+     * huge kick and no easing at all. The slope jumps in a single step and
+     * everything past that segment leaves the screen sideways almost at once,
+     * which is what a real corner does: you cannot see down the next passage
+     * until you are standing in it.
+     *
+     * That segment is flagged so the renderer can put a solid wall across the
+     * corridor there - the wall you would walk into if you failed to turn.
+     * The dead end is what actually reads as ninety degrees; the offset alone
+     * only ever reads as a swerve.
+     *
+     * Direction is a straight coin flip with no memory. */
+    var KICK = 260;
 
-    /* Every corner is the SAME shape - fixed ease and fixed hold - so every
-     * one turns through the same angle. Varying the hold length would make
-     * some corners 60 degrees and others 120. Only the direction is random,
-     * and it is a straight coin flip with no memory, so the corridor wanders
-     * genuinely rather than politely zig-zagging. */
-    addRoad(6, 44, 6, 0);                       // opening straight
+    addRoad(6, 44, 6, 0);                              // opening straight
     for (var s = 0; s < 16; s++) {
       var dir = rnd(rng) < 0.5 ? -1 : 1;
-      addRoad(3, 10, 3, dir * CORNER);                 // the corner, always 90
-      addRoad(4, rint(rng, 26, 44), 4, 0);             // ~2s straight after it
+      addSegment(dir * KICK);                          // the corner: one step
+      this.segments[this.segments.length - 1].corner = dir;
+      addRoad(0, rint(rng, 48, 74), 0, 0);             // ~2.3s straight after it
     }
 
     /* Dress the walls: portraits, sconces, boarded windows, doors, cobwebs
@@ -364,6 +370,47 @@
             inward: isL ? 1 : -1,
             centreX: nr.fx
           });
+        }
+      }
+
+      /* --- the wall across the end of the passage ------------------------
+       * Drawn at the corner segment, spanning the full cross-section. This is
+       * the face you would hit walking straight on, and it is what turns an
+       * offset into a visible right-angle turn. */
+      if (f.seg.corner && f.ys) {
+        var ew = SB.HAUNTED;
+        g.fillStyle = ew.hsl(ew.PALETTE.paper, fog, -6);
+        g.beginPath();
+        g.moveTo(f.fx - f.w, f.ys.rail);
+        g.lineTo(f.fx + f.w, f.ys.rail);
+        g.lineTo(f.fx + f.w, f.ys.cornice);
+        g.lineTo(f.fx - f.w, f.ys.cornice);
+        g.closePath();
+        g.fill();
+
+        /* the same joinery as the side walls, so the corner is clearly part
+         * of the same house */
+        g.fillStyle = ew.hsl(ew.PALETTE.rail, fog, 4);
+        g.fillRect(f.fx - f.w, f.ys.dado, f.w * 2, Math.max(1, f.ys.rail - f.ys.dado));
+        g.fillStyle = ew.hsl(ew.PALETTE.panel, fog, -2);
+        g.fillRect(f.fx - f.w, f.ys.skirt, f.w * 2, Math.max(1, f.ys.dado - f.ys.skirt));
+        g.fillStyle = ew.hsl(ew.PALETTE.skirt, fog, 3);
+        g.fillRect(f.fx - f.w, f.ys.floor, f.w * 2, Math.max(1, f.ys.skirt - f.ys.floor));
+        g.fillStyle = ew.hsl(ew.PALETTE.cornice, fog, 0);
+        g.fillRect(f.fx - f.w, f.ys.top, f.w * 2, Math.max(1, f.ys.cornice - f.ys.top));
+
+        /* a portrait hung on the dead end, because of course there is */
+        if (f.w > 14) {
+          var pw = f.w * 0.5, ph = (f.ys.rail - f.ys.cornice) * 0.55;
+          var pcx = f.fx, pcy = (f.ys.rail + f.ys.cornice) / 2;
+          g.fillStyle = ew.hsl(ew.PALETTE.gilt, fog, -12);
+          g.fillRect(pcx - pw / 2, pcy - ph / 2, pw, ph);
+          g.fillStyle = 'hsla(20,30%,9%,' + fog + ')';
+          g.fillRect(pcx - pw * 0.38, pcy - ph * 0.38, pw * 0.76, ph * 0.76);
+          g.fillStyle = 'hsla(34,22%,60%,' + (0.8 * fog) + ')';
+          g.beginPath();
+          g.ellipse(pcx, pcy - ph * 0.06, pw * 0.2, ph * 0.24, 0, 0, Math.PI * 2);
+          g.fill();
         }
       }
 
