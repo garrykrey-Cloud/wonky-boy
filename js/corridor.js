@@ -78,11 +78,20 @@
     var dir = 0;
     var x = 0, z = 0;
 
-    /* Runs of 10-18 slices - roughly two to three seconds apart - each
-     * meeting the next at a true right angle. Direction is a coin flip with
-     * no memory, so it genuinely wanders. */
+    /* RUN LENGTH IS IN POINTS, AND POINTS ARE SEG_LEN APART.
+     *
+     * This is worth spelling out because getting it wrong is invisible in a
+     * still and ruinous in motion. At SPEED units/sec a run of n points lasts
+     * n * SEG_LEN / SPEED seconds. The old road-renderer track counted its
+     * straights in segments and this rewrite reused those numbers unchanged,
+     * which gave runs of 2000-3600 units - 0.38 to 0.69 SECONDS apiece. With
+     * a 0.3s pivot on the end of each, the corridor spent 45% of its life
+     * mid-turn and never held still long enough to read as a hallway.
+     *
+     * 52-88 points is 10400-17600 units, i.e. 2.0 to 3.4 seconds of straight
+     * between corners, which is what was actually intended all along. */
     for (var r = 0; r < 26; r++) {
-      var len = rint(rng, 10, 18);
+      var len = rint(rng, 52, 88);
       var run = { dir: dir, len: len, x0: x, z0: z, startPoint: this.points.length };
       for (var i = 0; i <= len; i++) {
         this.points.push({
