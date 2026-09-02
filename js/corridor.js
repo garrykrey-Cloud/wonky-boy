@@ -37,11 +37,21 @@
   var HORIZON = 0.44;
   var SPEED = 5200;        // world units per second down a straight
 
-  /* THE TURN. It cannot be instantaneous - it needs at least ten frames. At
-   * 60fps this is eighteen: quick enough to feel urgent, slow enough to read
-   * as a pivot rather than a jump cut. */
-  var TURN_TIME = 0.30;
-  var TURN_CREEP = 0;      // pivot in place: the camera is standing in the junction
+  /* THE TURN, AS A PIECE OF MECHANICS.
+   *
+   * Nobody rounds a corner at a sprint. Speed eases off over EASE_DIST on
+   * the approach, reaches its minimum at the apex, then builds back up over
+   * the same distance on the way out - so the corner is symmetric and the
+   * whole thing reads as a body negotiating a right angle rather than a
+   * camera being teleported round one.
+   *
+   * TURN_TIME is not chosen by feel: it is how long the quarter-circle arc
+   * through the junction actually takes at the apex speed, so the pivot and
+   * the travel agree with each other. At the values below that is about half
+   * a second, or thirty frames. */
+  var TURN_MIN_SPEED = 0.25;   // fraction of full speed at the apex
+  var EASE_DIST = 2600;        // world units of ramp either side of a corner
+  var TURN_TIME = (Math.PI / 2 * ROAD_W) / (SPEED * TURN_MIN_SPEED);
 
   var NEAR = 60;           // near clip, world units
 
@@ -53,6 +63,14 @@
   function rnd(rng) { return rng ? rng.next() : Math.random(); }
   function rint(rng, a, b) { return Math.floor(a + rnd(rng) * (b - a + 1)); }
   function smoothstep(p) { return p * p * (3 - 2 * p); }
+
+  /* Full speed once further than EASE_DIST from a corner, easing down to
+   * TURN_MIN_SPEED as it closes. */
+  function cornerEase(dist) {
+    if (dist >= EASE_DIST) return 1;
+    if (dist <= 0) return TURN_MIN_SPEED;
+    return TURN_MIN_SPEED + (1 - TURN_MIN_SPEED) * smoothstep(dist / EASE_DIST);
+  }
 
   /* ------------------------------------------------------------- the path */
 
@@ -226,7 +244,14 @@
       return;
     }
 
-    this.along += SPEED * dt;
+    /* Ease down toward the next corner and back up away from the last one.
+     * Whichever corner is nearer governs, so short runs simply never reach
+     * full speed - which is also what happens in a real building. */
+    var toCorner = (runLen - ROAD_W) - this.along;
+    var fromCorner = this.along - ROAD_W;
+    this.speedFactor = Math.min(cornerEase(toCorner), cornerEase(fromCorner));
+    this.along += SPEED * this.speedFactor * dt;
+
     /* Start the pivot at the junction's MOUTH, not its centre, so the arc
      * below begins exactly where the camera already is. */
     if (this.along >= runLen - ROAD_W) {
@@ -261,19 +286,22 @@
    * running backwards. That is the bug this exists to prevent; it has come
    * back twice. */
   Corridor.prototype.headingFor = function (run) {
-    /* Deriving this from projectPoint rather than guessing, because guessing
-     * got it wrong twice. projectPoint computes
-     *     depth = dz*cos(-yaw) + dx*sin(-yaw)
-     * so the view direction is (sin(-yaw), cos(-yaw)) in (x, z). Facing back
-     * down the run means that vector must equal -DIR4[dir].
+    /* MUST MATCH toCamera's SIGN CONVENTION.
      *
-     * Solving gives forward yaw = ((4 - dir) % 4) * 90, and backwards is that
-     * plus 180. The obvious-looking (dir + 2) * 90 is NOT the same thing: it
-     * happens to be right for dir 0 and 2 and is exactly inverted for 1 and
-     * 3, because x maps to sin and z to cos, which reverses the handedness of
-     * the odd directions. That is why the corridor ran the correct way down
-     * some halls and backwards down others. */
-    return ((4 - run.dir) % 4) * (Math.PI / 2) + Math.PI;
+     * toCamera computes depth as dz*cos(yaw) + dx*sin(yaw), so the view
+     * direction is (sin(yaw), cos(yaw)). Facing back down the run means that
+     * vector equals -DIR4[dir], and solving gives ((dir + 2) % 4) * 90.
+     *
+     * This was previously derived against sin(-yaw), which the projection
+     * used at the time. When toCamera later switched to sin(+yaw) this was
+     * not updated with it, and the two have disagreed ever since - correctly
+     * for north/south runs, where the sin term is zero, and inverted for
+     * east/west runs, which put that entire hallway BEHIND the camera so it
+     * drew nothing at all. That is the corridor appearing and disappearing.
+     *
+     * If the projection's sign is ever changed again, this must change with
+     * it. There is a check for exactly this in tools/selftest.js. */
+    return ((run.dir + 2) % 4) * (Math.PI / 2);
   };
 
   Corridor.prototype.cameraPos = function () {
@@ -391,7 +419,13 @@
      * it is gathered too. Skipped when the path wraps, where the runs are not
      * contiguous in the array. */
     var showNext = this.turning && nextRun.startPoint > run.startPoint;
-    if (showNext) startIdx = nextRun.startPoint + nextRun.len;
+    /* Mid-pivot, start a SHORT way into the next run rather than at its far
+     * end. The walk runs downward, so starting at the far end of an 88-point
+     * run consumes the whole DRAW_DIST budget before reaching the junction,
+     * and everything actually near the camera is missed - which blacked out
+     * the screen for the whole turn once runs got longer. Both hallways meet
+     * AT the junction, so that is where to look from. */
+    if (showNext) startIdx = nextRun.startPoint + Math.min(nextRun.len, 26);
 
     var frames = [];
     for (var n = 0; n < DRAW_DIST; n++) {

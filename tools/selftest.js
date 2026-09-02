@@ -160,6 +160,69 @@ check('the walk to the exit grows with progress', (() => {
   return walk(1) < walk(300) && walk(300) < walk(1000);
 })(), [1, 300, 1000].map(n => n + ':' + (MAZE.build(n).solution.length - 1)).join(' '));
 
+/* ---------------------------------------------------------------- corridor
+ * The splash corridor's camera heading must agree with the projection's sign
+ * convention. These have silently disagreed twice. The symptom is subtle:
+ * north/south hallways render correctly while east/west ones put their whole
+ * geometry BEHIND the camera and draw nothing, so the corridor appears and
+ * vanishes as the maze turns. It looks like an art problem; it is arithmetic.
+ */
+console.log('');
+console.log('Splash corridor');
+try {
+  require(path.join(JS, 'theme.js'));
+  require(path.join(JS, 'haunted.js'));
+  require(path.join(JS, 'paintings.js'));
+  require(path.join(JS, 'carpet.js'));
+  require(path.join(JS, 'furniture.js'));
+  require(path.join(JS, 'corridor.js'));
+
+  const C = new SB.Corridor('selftest');
+  const dirsSeen = new Set();
+  let behind = 0, checked = 0;
+  for (let r = 0; r < 16; r++) {
+    while (C.turning) C.advance(1 / 60);
+    for (let k = 0; k < 40; k++) C.advance(1 / 60);
+    const run = C.runs[C.runIdx];
+    const cam = C.cameraPos();
+    /* the same convention toCamera() uses in corridor.js */
+    const sinY = Math.sin(C.yaw), cosY = Math.cos(C.yaw);
+    const P = C.points[run.startPoint + Math.max(0, Math.floor(C.along / 200) - 3)];
+    const depth = (P.z - cam.z) * cosY + (P.x - cam.x) * sinY;
+    dirsSeen.add(run.dir);
+    checked++;
+    if (depth <= 0) behind++;
+    while (!C.turning) C.advance(1 / 60);
+  }
+  check('corridor renders in every direction', behind === 0,
+    behind + ' of ' + checked + ' runs had geometry behind the camera');
+  check('all four compass directions exercised', dirsSeen.size === 4,
+    [...dirsSeen].sort().join(','));
+
+  const C2 = new SB.Corridor('cadence');
+  let turns = 0, frames = 0, turning = 0, was = false;
+  for (let f = 0; f < 60 * 40; f++) {
+    C2.advance(1 / 60);
+    frames++;
+    if (C2.turning) turning++;
+    if (C2.turning && !was) turns++;
+    was = C2.turning;
+  }
+  const gap = 40 / turns;
+  check('corners are seconds apart, not fractions', gap > 1.8 && gap < 4.5, gap.toFixed(2) + 's apart');
+  check('most of the time is spent going straight', turning / frames < 0.25,
+    Math.round(100 * turning / frames) + '% turning');
+  check('speed eases through corners', (function () {
+    const C3 = new SB.Corridor('speed');
+    let min = 1, max = 0;
+    for (let f = 0; f < 60 * 20; f++) { C3.advance(1 / 60); const v = C3.speedFactor || 1; min = Math.min(min, v); max = Math.max(max, v); }
+    return min < 0.4 && max > 0.95;
+  })(), 'slows into the apex, returns to full on the straight');
+} catch (e) {
+  failures++;
+  console.log('  FAIL corridor checks threw -> ' + e.message);
+}
+
 console.log('\nSummary');
 console.log('  average hazards per board: ' + (hazTotal / 1000).toFixed(1) + ', busiest board: ' + maxHaz);
 console.log('  ' + (failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'));
