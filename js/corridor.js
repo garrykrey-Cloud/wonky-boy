@@ -175,21 +175,64 @@
       var d = this.turnTo - this.turnFrom;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
-      this.yaw = this.turnFrom + d * smoothstep(p);
-      this.along += SPEED * TURN_CREEP * dt;   // barely creeping while pivoting
+      var e = smoothstep(p);
+      this.yaw = this.turnFrom + d * e;
+
+      /* ROUND the corner, do not pivot on the spot.
+       *
+       * Standing still at the vertex puts the camera about half a corridor
+       * width from the junction's solid wall, so for the whole pivot the
+       * frame is one flat expanse of wallpaper with no depth in it at all -
+       * which reads as an open room rather than a hallway, alternating with
+       * the corridor every couple of seconds.
+       *
+       * Nobody stops dead at a corner. The camera now follows a quadratic
+       * Bezier from the entry mouth, through the vertex as control point, to
+       * the exit mouth of the next run, timed on the same easing as the yaw.
+       * The old hall swings out, the corner passes, the new hall opens up,
+       * and there is corridor on screen the entire way through. */
+      var A = DIR4[run.dir], B = DIR4[this.turnNextDir];
+      var jx = run.x0 + A.dx * runLen, jz = run.z0 + A.dz * runLen;
+      var ix = jx - A.dx * ROAD_W, iz = jz - A.dz * ROAD_W;
+      var ox = jx + B.dx * ROAD_W, oz = jz + B.dz * ROAD_W;
+      var u = 1 - e;
+      this.turnPos = {
+        x: u * u * ix + 2 * u * e * jx + e * e * ox,
+        z: u * u * iz + 2 * u * e * jz + e * e * oz
+      };
       if (p >= 1) {
         this.turning = false;
         this.runIdx = (this.runIdx + 1) % this.runs.length;
-        this.along = 0;
+        /* Step clear of the junction rather than landing dead on it.
+         * Finishing a pivot at along = 0 leaves the camera standing exactly
+         * ON the vertex, so the corner wall behind it is at distance zero,
+         * gets thrown away by the near clip, and the view stays dim and empty
+         * for half a second until enough of the new run accumulates. One
+         * corridor half-width puts the corner a readable distance behind,
+         * which is physically where you are once the turn is complete.
+         * At full speed this is under a tenth of a second of travel. */
+        this.along = ROAD_W;
         this.yaw = this.headingFor(this.runs[this.runIdx]);
       }
       return;
     }
 
     this.along += SPEED * dt;
-    if (this.along >= runLen) {
-      this.along = runLen;
+    /* Start the pivot at the junction's MOUTH, not its centre, so the arc
+     * below begins exactly where the camera already is. */
+    if (this.along >= runLen - ROAD_W) {
+      this.along = runLen - ROAD_W;
       var next = this.runs[(this.runIdx + 1) % this.runs.length];
+      this.turnNextDir = next.dir;
+      /* Seed the arc at the mouth. The turning branch above runs BEFORE
+       * this trigger, so without seeding it here the first frame of the new
+       * turn would read the previous turn's stale arc position and the
+       * camera would teleport across the map. */
+      var mA = DIR4[run.dir];
+      this.turnPos = {
+        x: run.x0 + mA.dx * (runLen - ROAD_W),
+        z: run.z0 + mA.dz * (runLen - ROAD_W)
+      };
       this.turning = true;
       this.turnT = 0;
       this.turnFrom = this.yaw;
@@ -225,6 +268,7 @@
   };
 
   Corridor.prototype.cameraPos = function () {
+    if (this.turning && this.turnPos) return this.turnPos;
     var run = this.runs[this.runIdx];
     var d = DIR4[run.dir];
     return { x: run.x0 + d.dx * this.along, z: run.z0 + d.dz * this.along };
@@ -312,10 +356,41 @@
      * is behind the view and the near clip removes it. */
     var startIdx = run.startPoint + Math.min(run.len, Math.floor(this.along / SEG_LEN) + 1);
 
+    /* HOW MUCH OF THE MAZE TO DRAW.
+     *
+     * Walking the full DRAW_DIST back from the camera runs through many
+     * earlier runs, all perpendicular, whose wall quads project as enormous
+     * skewed shapes across the frame. Measured before fixing: 42 to 58 of 60
+     * slices came from a foreign run, and the count rose and fell with the
+     * turn rhythm - which is exactly what made the view alternate between
+     * corridor and open room every couple of seconds.
+     *
+     * Culling to the current run alone overcorrected twice over. Looking back
+     * at a corner, the opening you came through is right in the sightline, so
+     * dropping the previous hallway punched a black hole in the junction. And
+     * mid-pivot the hallway being turned INTO is swinging across the frame,
+     * so dropping that left half the screen empty.
+     *
+     * The honest answer is what you can actually see from inside a corner:
+     * this hallway, one back through the opening behind, and - only while
+     * pivoting - the one ahead. Never more.
+     */
+    var prevIdx = (this.runIdx - 1 + this.runs.length) % this.runs.length;
+    var nextIdx = (this.runIdx + 1) % this.runs.length;
+    var nextRun = this.runs[nextIdx];
+    /* Mid-turn, start the walk at the far end of the hallway being entered so
+     * it is gathered too. Skipped when the path wraps, where the runs are not
+     * contiguous in the array. */
+    var showNext = this.turning && nextRun.startPoint > run.startPoint;
+    if (showNext) startIdx = nextRun.startPoint + nextRun.len;
+
     var frames = [];
     for (var n = 0; n < DRAW_DIST; n++) {
-      var pi = ((startIdx - n) % pts.length + pts.length) % pts.length;
+      var pi = startIdx - n;
+      if (pi < 0) break;
       var P = pts[pi];
+      if (P.run !== this.runIdx && P.run !== prevIdx &&
+          !(showNext && P.run === nextIdx)) break;
       var d = DIR4[P.dir];
       /* wall lines either side of the centre, perpendicular to the run */
       var rxw = P.x + d.dz * ROAD_W, rzw = P.z - d.dx * ROAD_W;
@@ -470,13 +545,27 @@
       g.stroke();
     }
 
-    /* The junction you are standing in, last, so it sits on top of
-     * everything. This is what fills the frame during a pivot. */
+    /* The junction you are standing in, last, so it sits on top of everything.
+     *
+     * Two different junctions can matter. The one at the FAR end of the run is
+     * the corner you came through, and caps the corridor so you are not
+     * looking into black where the previous hallway used to be drawn. The one
+     * at the NEAR end is the corner you are pivoting through right now; it is
+     * indexed against the NEXT run's first point, which this run's frames do
+     * not include, so it has to be drawn explicitly or the screen empties out
+     * mid-turn. */
     for (var jn = Math.min(3, frames.length - 1); jn >= 0; jn--) {
       var jf = frames[jn];
       if (!jf || jf.P.i !== 0) continue;
       this.junctionAt(g, jf.P, cam, sinY, cosY, W, H,
         Math.pow(1 - (jf.n / DRAW_DIST), 1.7), jf.P.band);
+    }
+
+    if (this.turning) {
+      var endPt = pts[run.startPoint + run.len];
+      var nextRun = this.runs[(this.runIdx + 1) % this.runs.length];
+      this.junction(g, { x: endPt.x, z: endPt.z, dir: run.dir }, nextRun.dir,
+        cam, sinY, cosY, W, H, 1, endPt.band);
     }
 
     for (var k = frames.length - 1; k >= 0; k--) {
