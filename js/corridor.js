@@ -418,8 +418,22 @@
     }
     var startIdx = Math.floor(camPt) + 2;
 
+    /* BUDGET ONLY WHAT CAN ACTUALLY BE SEEN.
+     *
+     * The walk used to take exactly DRAW_DIST points regardless of whether
+     * they were in front of the camera. During a pivot the anchor slides
+     * forward into the next hallway, and those points sit BEHIND a
+     * backward-facing camera. They get dropped later by the near-plane clip,
+     * but they have already consumed the budget - measured at the end of a
+     * turn: 53 of 60 slices discarded, 2 drawn. The wall simply stopped
+     * existing, which is what showed as black boxes.
+     *
+     * So the budget now counts only slices with something in front of the
+     * camera, and the walk is allowed to look further back to find them. The
+     * hard cap keeps it bounded. */
     var frames = [];
-    for (var n = 0; n < DRAW_DIST; n++) {
+    var usable = 0;
+    for (var n = 0; n < DRAW_DIST * 3 && usable < DRAW_DIST; n++) {
       var pi = startIdx - n;
       if (pi < 0) break;
       var P = pts[pi];
@@ -446,13 +460,11 @@
       /* Camera space only. Projection happens per EDGE in the pair loop, so
        * a slice with one end behind the camera can be clipped instead of
        * discarded. */
-      frames.push({
-        P: P, n: n,
-        cC: toCamera(P.x, P.z, cam, sinY, cosY),
-        cL: toCamera(lxw, lzw, cam, sinY, cosY),
-        cR: toCamera(rxw, rzw, cam, sinY, cosY),
-        endP: endP
-      });
+      var fC = toCamera(P.x, P.z, cam, sinY, cosY);
+      var fL = toCamera(lxw, lzw, cam, sinY, cosY);
+      var fR = toCamera(rxw, rzw, cam, sinY, cosY);
+      if (fC.d > NEAR || fL.d > NEAR || fR.d > NEAR) usable++;
+      frames.push({ P: P, n: frames.length, cC: fC, cL: fL, cR: fR, endP: endP });
     }
 
     /* Turn a pair of frames into projected near/far points for one line of the
@@ -490,9 +502,29 @@
       nr.w = Math.abs(eR.near.x - eL.near.x) / 2;
       var ff = { L: eL.far, R: eR.far, C: eC.far, ys: heights(eC.far) };
       /* `f` keeps its P/n/endP; give it the projected geometry too */
-      f = { P: f.P, n: f.n, endP: f.endP, L: ff.L, R: ff.R, C: ff.C, ys: ff.ys };
+      var fcam = { cC: f.cC, cL: f.cL, cR: f.cR };
+      f = { P: f.P, n: f.n, endP: f.endP, cC: fcam.cC, cL: fcam.cL, cR: fcam.cR,
+            L: ff.L, R: ff.R, C: ff.C, ys: ff.ys };
 
       var band = f.P.band;
+
+      /* WHEN A SLICE IS TOO CLOSE TO DRESS.
+       *
+       * Wall slices are clipped against the near plane, so a slice with one
+       * end behind the camera still draws - correctly - as a stretched quad.
+       * The panelling copes with that because it is flat colour. The wall
+       * DRESSING does not: a painting is a dark canvas inside a frame, and
+       * stretching that trapezoid across a clipped slice paints a large
+       * near-black rectangle over the wall. Those are the black boxes that
+       * appear during a turn, when the camera swings close to the corner.
+       *
+       * So dressing is skipped on any slice that is clipped or has blown up
+       * on screen. The wall itself still draws; it just stays plain for the
+       * frame or two where a picture could not be drawn honestly. */
+      var nearestDepth = Math.min(nrf.cC.d, nrf.cL.d, nrf.cR.d, f.cC.d, f.cL.d, f.cR.d);
+      var span = Math.max(Math.abs(nr.L.x - f.L.x), Math.abs(nr.R.x - f.R.x));
+      var dressable = nearestDepth > NEAR * 2.5 && span < W * 1.5;
+
       var detail = f.n < 26;
 
       /* floorboards */
@@ -527,7 +559,7 @@
       }
 
       /* wall dressing */
-      if (detail && f.P.feature) {
+      if (detail && dressable && f.P.feature) {
         var ft = f.P.feature;
         var fn = HAUNT.FEATURES[ft.kind];
         if (fn) {
@@ -540,7 +572,7 @@
       }
 
       /* furniture */
-      if (detail && f.n >= 4 && f.P.furn && SB.FURNITURE) {
+      if (detail && dressable && f.n >= 4 && f.P.furn && SB.FURNITURE) {
         var fu = f.P.furn;
         var piece = SB.FURNITURE.PIECES[fu.kind];
         if (piece) {
