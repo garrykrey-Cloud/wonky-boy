@@ -387,45 +387,36 @@
     var pts = this.points;
 
     var run = this.runs[this.runIdx];
-    /* Looking back down the run, so the points in view are the ones with a
-     * LOWER index: walk down the array, not up. Start one point past the
-     * camera so the nearest slice still has a partner to pair with; that one
-     * is behind the view and the near clip removes it. */
-    var startIdx = run.startPoint + Math.min(run.len, Math.floor(this.along / SEG_LEN) + 1);
-
-    /* HOW MUCH OF THE MAZE TO DRAW.
+    /* WHERE THE WALK STARTS - AND WHY IT MUST NOT BRANCH ON `turning`.
      *
-     * Walking the full DRAW_DIST back from the camera runs through many
-     * earlier runs, all perpendicular, whose wall quads project as enormous
-     * skewed shapes across the frame. Measured before fixing: 42 to 58 of 60
-     * slices came from a foreign run, and the count rose and fell with the
-     * turn rhythm - which is exactly what made the view alternate between
-     * corridor and open room every couple of seconds.
+     * Looking back down the run, the points in view are the ones with a LOWER
+     * index, so the walk runs down the array. The anchor is the camera's own
+     * position along the path plus a small lookahead, so the nearest slice
+     * always has a partner to pair with.
      *
-     * Culling to the current run alone overcorrected twice over. Looking back
-     * at a corner, the opening you came through is right in the sightline, so
-     * dropping the previous hallway punched a black hole in the junction. And
-     * mid-pivot the hallway being turned INTO is swinging across the frame,
-     * so dropping that left half the screen empty.
+     * This used to switch to a different anchor the moment a pivot began,
+     * which swapped the entire set of drawn geometry in ONE frame. Because
+     * the camera has eased almost to a standstill by then, the surrounding
+     * frames differ by 1 or 2 units and that one differed by 45 - a hard
+     * visual cut, landing exactly as the turn started.
      *
-     * The honest answer is what you can actually see from inside a corner:
-     * this hallway, one back through the opening behind, and - only while
-     * pivoting - the one ahead. Never more.
+     * So the anchor is continuous instead. During the pivot it SLIDES forward
+     * into the next run by (1 + 2*ROAD_W/SEG_LEN) points, eased on the same
+     * curve as the yaw. That constant is not a guess: it is exactly the gap
+     * between where this run's anchor ends and where the next run's anchor
+     * begins, so the anchor is continuous at BOTH ends of the turn.
      */
     var prevIdx = (this.runIdx - 1 + this.runs.length) % this.runs.length;
     var nextIdx = (this.runIdx + 1) % this.runs.length;
     var nextRun = this.runs[nextIdx];
-    /* Mid-turn, start the walk at the far end of the hallway being entered so
-     * it is gathered too. Skipped when the path wraps, where the runs are not
-     * contiguous in the array. */
-    var showNext = this.turning && nextRun.startPoint > run.startPoint;
-    /* Mid-pivot, start a SHORT way into the next run rather than at its far
-     * end. The walk runs downward, so starting at the far end of an 88-point
-     * run consumes the whole DRAW_DIST budget before reaching the junction,
-     * and everything actually near the camera is missed - which blacked out
-     * the screen for the whole turn once runs got longer. Both hallways meet
-     * AT the junction, so that is where to look from. */
-    if (showNext) startIdx = nextRun.startPoint + Math.min(nextRun.len, 26);
+    var contiguous = nextRun.startPoint > run.startPoint;
+
+    var camPt = run.startPoint + this.along / SEG_LEN;
+    if (this.turning && contiguous) {
+      var tp = Math.min(1, this.turnT / TURN_TIME);
+      camPt += smoothstep(tp) * (1 + 2 * ROAD_W / SEG_LEN);
+    }
+    var startIdx = Math.floor(camPt) + 2;
 
     var frames = [];
     for (var n = 0; n < DRAW_DIST; n++) {
@@ -433,7 +424,7 @@
       if (pi < 0) break;
       var P = pts[pi];
       if (P.run !== this.runIdx && P.run !== prevIdx &&
-          !(showNext && P.run === nextIdx)) break;
+          !(contiguous && P.run === nextIdx)) break;
       var d = DIR4[P.dir];
       /* wall lines either side of the centre, perpendicular to the run */
       var rxw = P.x + d.dz * ROAD_W, rzw = P.z - d.dx * ROAD_W;
@@ -604,12 +595,6 @@
         Math.pow(1 - (jf.n / DRAW_DIST), 1.7), jf.P.band);
     }
 
-    if (this.turning) {
-      var endPt = pts[run.startPoint + run.len];
-      var nextRun = this.runs[(this.runIdx + 1) % this.runs.length];
-      this.junction(g, { x: endPt.x, z: endPt.z, dir: run.dir }, nextRun.dir,
-        cam, sinY, cosY, W, H, 1, endPt.band);
-    }
 
     for (var k = frames.length - 1; k >= 0; k--) {
       var fr = frames[k];
