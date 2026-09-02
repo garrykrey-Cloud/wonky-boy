@@ -209,7 +209,19 @@
    * running backwards. That is the bug this exists to prevent; it has come
    * back twice. */
   Corridor.prototype.headingFor = function (run) {
-    return ((run.dir + 2) % 4) * (Math.PI / 2);
+    /* Deriving this from projectPoint rather than guessing, because guessing
+     * got it wrong twice. projectPoint computes
+     *     depth = dz*cos(-yaw) + dx*sin(-yaw)
+     * so the view direction is (sin(-yaw), cos(-yaw)) in (x, z). Facing back
+     * down the run means that vector must equal -DIR4[dir].
+     *
+     * Solving gives forward yaw = ((4 - dir) % 4) * 90, and backwards is that
+     * plus 180. The obvious-looking (dir + 2) * 90 is NOT the same thing: it
+     * happens to be right for dir 0 and 2 and is exactly inverted for 1 and
+     * 3, because x maps to sin and z to cos, which reverses the handedness of
+     * the odd directions. That is why the corridor ran the correct way down
+     * some halls and backwards down others. */
+    return ((4 - run.dir) % 4) * (Math.PI / 2) + Math.PI;
   };
 
   Corridor.prototype.cameraPos = function () {
