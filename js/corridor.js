@@ -2,26 +2,28 @@
  * ---------------------------------------------------------------------------
  * The 3D maze corridor behind the splash boy.
  *
- * WHY THIS IS REAL GEOMETRY AND NOT THE ROAD TRICK
+ * ARCHITECTURE
  *
- * This began as the classic pseudo-3D road renderer, where the corridor is a
- * list of slices and a per-slice `curve` value slides them sideways. That
- * technique cannot turn a corner. Its entire world model assumes the corridor
- * always heads away from the camera, so a "turn" is really the hall drifting
- * sideways while you carry on looking the same way. Ease it and you get a
- * bend; snap it and you get a cut two frames long. Neither is a corner.
+ * The maze is a path of axis-aligned straight runs meeting at right angles.
+ * maze3d.js turns that path into ONE closed wall boundary - the centreline
+ * offset left and right by the corridor half-width - plus a set of floor
+ * quads. Corners are part of that boundary, not a special case bolted on.
  *
- * So the corridor is now genuine world-space geometry: an axis-aligned path of
- * straight runs meeting at right angles, and a camera with a position and a
- * HEADING that pivots through 90 degrees on reaching a vertex. The turn takes
- * TURN_TIME seconds - about eighteen frames - during which the camera slows
- * almost to a stop and rotates, exactly as a person would at the end of a
- * hallway. The end wall sweeps out of frame and the next passage swings in.
+ * That distinction is the whole point. The previous renderer drew wall slices
+ * belonging to whichever RUN the camera was in, and patched the corners with a
+ * separate junction routine. Every gap, black box and flicker during a turn
+ * came from the seam between those two systems. With one closed boundary the
+ * seam does not exist: a corner is two wall pieces meeting at a vertex, drawn
+ * by exactly the same code as a straight.
  *
- * Everything downstream is unchanged: each slice still hands haunted.js and
- * furniture.js a near and far wall line plus the constants that turn a world
- * height into a screen y, so the panelling, portraits, armour and chandeliers
- * all draw exactly as before.
+ * THE CAMERA runs ahead of the boy and faces back at him, so what it sees
+ * recedes. It travels the path, easing off into each corner, rounding it on an
+ * arc while rotating through ninety degrees, and accelerating out again.
+ *
+ * COST. Everything per frame is bounded: candidate geometry comes only from
+ * the runs immediately around the camera, the visible set is capped, and the
+ * scratch buffers are allocated once and reused. No work is proportional to
+ * the size of the maze.
  * ------------------------------------------------------------------------ */
 (function (global) {
   'use strict';
@@ -32,30 +34,25 @@
   var ROAD_W = 430;        // half-width of the corridor
   var WALL_H = 2250;       // wall height
   var CAM_H = 620;         // eye height
-  var DRAW_DIST = 60;      // path points rendered ahead
   var FOV = 100;
   var HORIZON = 0.44;
-  var SPEED = 5200;        // world units per second down a straight
+  var SPEED = 5200;        // world units per second on a straight
+  var NEAR = 60;           // near clip, world units
+  var FAR = 13000;         // beyond this is fog
 
-  /* THE TURN, AS A PIECE OF MECHANICS.
-   *
-   * Nobody rounds a corner at a sprint. Speed eases off over EASE_DIST on
-   * the approach, reaches its minimum at the apex, then builds back up over
-   * the same distance on the way out - so the corner is symmetric and the
-   * whole thing reads as a body negotiating a right angle rather than a
-   * camera being teleported round one.
-   *
-   * TURN_TIME is not chosen by feel: it is how long the quarter-circle arc
-   * through the junction actually takes at the apex speed, so the pivot and
-   * the travel agree with each other. At the values below that is about half
-   * a second, or thirty frames. */
-  var TURN_MIN_SPEED = 0.25;   // fraction of full speed at the apex
-  var EASE_DIST = 2600;        // world units of ramp either side of a corner
+  /* THE TURN, AS MECHANICS. Speed eases off over EASE_DIST into a corner,
+   * bottoms out at the apex, and builds back over the same distance out, so
+   * the corner is symmetric. TURN_TIME is not a feel value: it is how long the
+   * quarter-circle arc through the junction takes at the apex speed, so the
+   * pivot and the travel agree. About half a second, or thirty frames. */
+  var TURN_MIN_SPEED = 0.25;
+  var EASE_DIST = 2600;
   var TURN_TIME = (Math.PI / 2 * ROAD_W) / (SPEED * TURN_MIN_SPEED);
 
-  var NEAR = 60;           // near clip, world units
+  /* Bounded draw budget - the ceiling on per-frame cost. */
+  var MAX_WALLS = 160;
+  var MAX_FLOORS = 100;
 
-  /* North, East, South, West. */
   var DIR4 = [
     { dx: 0, dz: 1 }, { dx: 1, dz: 0 }, { dx: 0, dz: -1 }, { dx: -1, dz: 0 }
   ];
@@ -64,13 +61,13 @@
   function rint(rng, a, b) { return Math.floor(a + rnd(rng) * (b - a + 1)); }
   function smoothstep(p) { return p * p * (3 - 2 * p); }
 
-  /* Full speed once further than EASE_DIST from a corner, easing down to
-   * TURN_MIN_SPEED as it closes. */
   function cornerEase(dist) {
     if (dist >= EASE_DIST) return 1;
     if (dist <= 0) return TURN_MIN_SPEED;
     return TURN_MIN_SPEED + (1 - TURN_MIN_SPEED) * smoothstep(dist / EASE_DIST);
   }
+
+  function byDepthDesc(a, b) { return b.depth - a.depth; }
 
   /* ------------------------------------------------------------- the path */
 
@@ -79,92 +76,98 @@
     this.cameraDepth = 1 / Math.tan((FOV / 2) * Math.PI / 180);
 
     this.runs = [];
-    this.points = [];
-    this.build();
+    this.buildPath();
 
-    this.runIdx = 0;
-    this.along = 0;
-    this.yaw = this.headingFor(this.runs[0]);
+    this.geo = SB.MAZE3D.build(this.runs, ROAD_W, SEG_LEN);
+    this.indexByRun();
+    this.dress();
+
+    this.runIdx = this.runs.length - 1;
+    this.along = this.runs[this.runIdx].len * SEG_LEN - ROAD_W;
+    this.yaw = this.headingFor(this.runs[this.runIdx]);
     this.turning = false;
     this.turnT = 0;
     this.turnFrom = this.yaw;
     this.turnTo = this.yaw;
+    this.turnPrevDir = this.runs[this.runIdx].dir;
+    this.turnPos = null;
+    this.speedFactor = 1;
+
+    /* Scratch, allocated once and reused. */
+    this._wallBuf = [];
+    this._floorBuf = [];
   }
 
-  Corridor.prototype.build = function () {
+  Corridor.prototype.buildPath = function () {
     var rng = this.rng;
-    var dir = 0;
-    var x = 0, z = 0;
-
-    /* RUN LENGTH IS IN POINTS, AND POINTS ARE SEG_LEN APART.
-     *
-     * This is worth spelling out because getting it wrong is invisible in a
-     * still and ruinous in motion. At SPEED units/sec a run of n points lasts
-     * n * SEG_LEN / SPEED seconds. The old road-renderer track counted its
-     * straights in segments and this rewrite reused those numbers unchanged,
-     * which gave runs of 2000-3600 units - 0.38 to 0.69 SECONDS apiece. With
-     * a 0.3s pivot on the end of each, the corridor spent 45% of its life
-     * mid-turn and never held still long enough to read as a hallway.
-     *
-     * 52-88 points is 10400-17600 units, i.e. 2.0 to 3.4 seconds of straight
-     * between corners, which is what was actually intended all along. */
+    var dir = 0, x = 0, z = 0;
+    /* Run length is in POINTS, and points are SEG_LEN apart, so n points last
+     * n*SEG_LEN/SPEED seconds - but the corner easing lowers the average
+     * speed, so the wall-clock gap is longer than that arithmetic suggests.
+     * 32-54 measures at about 3.2 seconds between corners. Getting this wrong
+     * is invisible in a still and ruinous in motion; it once produced a corner
+     * every 0.67 seconds, which never read as a hallway at all. */
     for (var r = 0; r < 26; r++) {
-      var len = rint(rng, 52, 88);
-      var run = { dir: dir, len: len, x0: x, z0: z, startPoint: this.points.length };
-      for (var i = 0; i <= len; i++) {
-        this.points.push({
-          x: x + DIR4[dir].dx * SEG_LEN * i,
-          z: z + DIR4[dir].dz * SEG_LEN * i,
-          dir: dir,
-          run: r,
-          i: i,
-          isEnd: i === len,
-          band: ((this.points.length / 3) | 0) % 2,
-          hazard: null,
-          feature: null,
-          furn: null
-        });
-      }
+      var len = rint(rng, 32, 54);
+      this.runs.push({ dir: dir, len: len, x0: x, z0: z });
       x += DIR4[dir].dx * SEG_LEN * len;
       z += DIR4[dir].dz * SEG_LEN * len;
-      this.runs.push(run);
       dir = (dir + (rnd(rng) < 0.5 ? 1 : 3)) % 4;   // +1 right, +3 left
     }
-
-    this.dressWalls();
   };
 
-  Corridor.prototype.dressWalls = function () {
+  /* Wall pieces are ordered along each boundary, so those belonging to a run
+   * form a contiguous span. Recording the spans lets a frame consider only
+   * the runs around the camera instead of the whole maze. */
+  Corridor.prototype.indexByRun = function () {
+    var spans = {}, i;
+    for (i = 0; i < this.geo.walls.length; i++) {
+      var w = this.geo.walls[i];
+      var key = w.side + ':' + w.run;
+      if (!spans[key]) spans[key] = { from: i, to: i };
+      spans[key].to = i;
+    }
+    this.wallSpans = spans;
+
+    var fs = {};
+    for (i = 0; i < this.geo.floors.length; i++) {
+      var f = this.geo.floors[i];
+      if (!fs[f.run]) fs[f.run] = { from: i, to: i };
+      fs[f.run].to = i;
+    }
+    this.floorSpans = fs;
+  };
+
+  Corridor.prototype.dress = function () {
     var rng = this.rng;
-    var pts = this.points;
+    var walls = this.geo.walls;
+    var at;
 
     var HAUNT = SB.HAUNTED;
     if (HAUNT) {
-      var fside = 'left';
-      var fat = rint(rng, 2, 5);
-      while (fat < pts.length - 1) {
-        pts[fat].feature = {
+      at = rint(rng, 2, 5);
+      while (at < walls.length) {
+        walls[at].feature = {
           kind: HAUNT.FEATURE_BAG[rint(rng, 0, HAUNT.FEATURE_BAG.length - 1)],
-          side: fside,
           phase: rnd(rng) * Math.PI * 2
         };
-        fside = fside === 'left' ? 'right' : 'left';
-        fat += rint(rng, 3, 6);
+        at += rint(rng, 5, 11);
       }
     }
 
     var FURN = SB.FURNITURE;
     if (FURN) {
-      var uat = rint(rng, 3, 7);
-      while (uat < pts.length - 2) {
-        var kind = FURN.BAG[rint(rng, 0, FURN.BAG.length - 1)];
-        pts[uat].furn = {
-          kind: kind,
-          side: rnd(rng) < 0.5 ? 'left' : 'right',
-          centre: !!FURN.CENTRE_PIECES[kind],
-          phase: rnd(rng) * Math.PI * 2
-        };
-        uat += rint(rng, 4, 8);
+      at = rint(rng, 4, 9);
+      while (at < walls.length) {
+        if (!walls[at].feature) {
+          var kind = FURN.BAG[rint(rng, 0, FURN.BAG.length - 1)];
+          walls[at].furn = {
+            kind: kind,
+            centre: !!FURN.CENTRE_PIECES[kind],
+            phase: rnd(rng) * Math.PI * 2
+          };
+        }
+        at += rint(rng, 9, 17);
       }
     }
 
@@ -173,23 +176,50 @@
              h.behavior === 'item' || h.behavior === 'zapStatic';
     });
     if (pool.length) {
-      var at = rint(rng, 3, 8);
-      while (at < pts.length - 2) {
-        var hz = pool[rint(rng, 0, pool.length - 1)];
-        pts[at].hazard = {
-          hz: hz,
-          side: hz.behavior === 'tile' ? 'floor'
-            : (hz.behavior === 'item' ? 'float'
-              : (rnd(rng) < 0.5 ? 'left' : 'right')),
-          lift: 0.25 + rnd(rng) * 0.5,
+      at = rint(rng, 3, 9);
+      while (at < walls.length) {
+        walls[at].hazard = {
+          hz: pool[rint(rng, 0, pool.length - 1)],
+          lift: 0.3 + rnd(rng) * 0.4,
           phase: rnd(rng) * Math.PI * 2
         };
-        at += rint(rng, 4, 9);
+        at += rint(rng, 8, 16);
       }
     }
   };
 
   /* ----------------------------------------------------------- the camera */
+
+  /* THE CAMERA FACES FORWARD AND TRAVELS BACKWARD.
+   *
+   * This is the crux of the whole splash, and it took several attempts.
+   *
+   * The boy runs at the camera, so the corridor must RECEDE. The obvious way
+   * to get that is to point the camera back down the hallway it came from and
+   * drive it forwards. That works on a straight and fails at every corner:
+   * what sits behind you just after rounding a right angle is the outer
+   * corner wall, a few hundred units from your face. A third of every cycle
+   * was spent staring at wallpaper with no depth in frame at all.
+   *
+   * Facing FORWARD and travelling BACKWARD gives the same recession - the
+   * camera moves away from everything it can see - but the view now always
+   * looks down open hallway, because the corridor ahead is the part not yet
+   * backed through. Corners arrive behind the camera and swing the view
+   * around, and what comes into frame is the hallway just left, seen end-on
+   * with its full depth.
+   *
+   * Consequences, all deliberate:
+   *   - runs are traversed in DECREASING index
+   *   - along counts DOWN, from the far end of a run to its near end
+   *   - yaw is the run own direction: view = (sin(yaw), cos(yaw)) = +DIR4,
+   *     which solves to dir * 90 degrees exactly, for all four directions
+   *
+   * tools/selftest.js checks the heading against the projection, because
+   * these two have silently disagreed before - once for exactly half the
+   * compass, which is why it looked correct in some screenshots. */
+  Corridor.prototype.headingFor = function (run) {
+    return run.dir * (Math.PI / 2);
+  };
 
   Corridor.prototype.advance = function (dt) {
     var run = this.runs[this.runIdx];
@@ -198,110 +228,57 @@
     if (this.turning) {
       this.turnT += dt;
       var p = Math.min(1, this.turnT / TURN_TIME);
-      /* shortest way round, so a left turn never spins the long way */
       var d = this.turnTo - this.turnFrom;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
       var e = smoothstep(p);
       this.yaw = this.turnFrom + d * e;
+      this.speedFactor = TURN_MIN_SPEED;
 
-      /* ROUND the corner, do not pivot on the spot.
-       *
-       * Standing still at the vertex puts the camera about half a corridor
-       * width from the junction's solid wall, so for the whole pivot the
-       * frame is one flat expanse of wallpaper with no depth in it at all -
-       * which reads as an open room rather than a hallway, alternating with
-       * the corridor every couple of seconds.
-       *
-       * Nobody stops dead at a corner. The camera now follows a quadratic
-       * Bezier from the entry mouth, through the vertex as control point, to
-       * the exit mouth of the next run, timed on the same easing as the yaw.
-       * The old hall swings out, the corner passes, the new hall opens up,
-       * and there is corridor on screen the entire way through. */
-      var A = DIR4[run.dir], B = DIR4[this.turnNextDir];
-      var jx = run.x0 + A.dx * runLen, jz = run.z0 + A.dz * runLen;
-      var ix = jx - A.dx * ROAD_W, iz = jz - A.dz * ROAD_W;
-      var ox = jx + B.dx * ROAD_W, oz = jz + B.dz * ROAD_W;
+      /* Round the corner on a quadratic Bezier rather than pivoting on the
+       * spot. Standing still at the vertex puts the lens half a corridor
+       * width from a flat wall, which reads as a room, not a hallway. */
+      var A = DIR4[run.dir], B = DIR4[this.turnPrevDir];
+      var jx = run.x0, jz = run.z0;                            // the junction
+      var ix = jx + A.dx * ROAD_W, iz = jz + A.dz * ROAD_W;    // entry mouth
+      var ox = jx - B.dx * ROAD_W, oz = jz - B.dz * ROAD_W;    // exit mouth
       var u = 1 - e;
       this.turnPos = {
         x: u * u * ix + 2 * u * e * jx + e * e * ox,
         z: u * u * iz + 2 * u * e * jz + e * e * oz
       };
+
       if (p >= 1) {
         this.turning = false;
-        this.runIdx = (this.runIdx + 1) % this.runs.length;
-        /* Step clear of the junction rather than landing dead on it.
-         * Finishing a pivot at along = 0 leaves the camera standing exactly
-         * ON the vertex, so the corner wall behind it is at distance zero,
-         * gets thrown away by the near clip, and the view stays dim and empty
-         * for half a second until enough of the new run accumulates. One
-         * corridor half-width puts the corner a readable distance behind,
-         * which is physically where you are once the turn is complete.
-         * At full speed this is under a tenth of a second of travel. */
-        this.along = ROAD_W;
-        this.yaw = this.headingFor(this.runs[this.runIdx]);
+        this.runIdx = (this.runIdx - 1 + this.runs.length) % this.runs.length;
+        var nr = this.runs[this.runIdx];
+        this.along = nr.len * SEG_LEN - ROAD_W;   // exactly where the arc ended
+        this.turnPos = null;
+        this.yaw = this.headingFor(nr);
       }
       return;
     }
 
-    /* Ease down toward the next corner and back up away from the last one.
-     * Whichever corner is nearer governs, so short runs simply never reach
-     * full speed - which is also what happens in a real building. */
-    var toCorner = (runLen - ROAD_W) - this.along;
-    var fromCorner = this.along - ROAD_W;
+    /* along counts down. Ease off approaching the corner at ROAD_W, and again
+     * just after entering a run at its far end, so corners are symmetric. */
+    var toCorner = this.along - ROAD_W;
+    var fromCorner = (runLen - ROAD_W) - this.along;
     this.speedFactor = Math.min(cornerEase(toCorner), cornerEase(fromCorner));
-    this.along += SPEED * this.speedFactor * dt;
+    this.along -= SPEED * this.speedFactor * dt;
 
-    /* Start the pivot at the junction's MOUTH, not its centre, so the arc
-     * below begins exactly where the camera already is. */
-    if (this.along >= runLen - ROAD_W) {
-      this.along = runLen - ROAD_W;
-      var next = this.runs[(this.runIdx + 1) % this.runs.length];
-      this.turnNextDir = next.dir;
-      /* Seed the arc at the mouth. The turning branch above runs BEFORE
-       * this trigger, so without seeding it here the first frame of the new
-       * turn would read the previous turn's stale arc position and the
-       * camera would teleport across the map. */
-      var mA = DIR4[run.dir];
-      this.turnPos = {
-        x: run.x0 + mA.dx * (runLen - ROAD_W),
-        z: run.z0 + mA.dz * (runLen - ROAD_W)
-      };
+    if (this.along <= ROAD_W) {
+      this.along = ROAD_W;
+      var prev = this.runs[(this.runIdx - 1 + this.runs.length) % this.runs.length];
+      this.turnPrevDir = prev.dir;
       this.turning = true;
       this.turnT = 0;
       this.turnFrom = this.yaw;
-      this.turnTo = this.headingFor(next);
+      this.turnTo = this.headingFor(prev);
+      /* Seed the arc where the camera already is, so the first frame of the
+       * pivot is continuous with the last frame of the straight. */
+      var mA = DIR4[run.dir];
+      this.turnPos = { x: run.x0 + mA.dx * this.along, z: run.z0 + mA.dz * this.along };
     }
-  };
-
-  /* THE CAMERA FACES BACKWARDS.
-   *
-   * It runs ahead of the boy and looks at him, so it travels along the run
-   * but faces the way it came. Features it can see therefore get FURTHER
-   * away every frame and shrink toward the vanishing point - the hallway
-   * recedes.
-   *
-   * Facing the direction of travel instead makes walls sweep out past the
-   * viewer, which is a camera chasing him from behind, and reads as the boy
-   * running backwards. That is the bug this exists to prevent; it has come
-   * back twice. */
-  Corridor.prototype.headingFor = function (run) {
-    /* MUST MATCH toCamera's SIGN CONVENTION.
-     *
-     * toCamera computes depth as dz*cos(yaw) + dx*sin(yaw), so the view
-     * direction is (sin(yaw), cos(yaw)). Facing back down the run means that
-     * vector equals -DIR4[dir], and solving gives ((dir + 2) % 4) * 90.
-     *
-     * This was previously derived against sin(-yaw), which the projection
-     * used at the time. When toCamera later switched to sin(+yaw) this was
-     * not updated with it, and the two have disagreed ever since - correctly
-     * for north/south runs, where the sin term is zero, and inverted for
-     * east/west runs, which put that entire hallway BEHIND the camera so it
-     * drew nothing at all. That is the corridor appearing and disappearing.
-     *
-     * If the projection's sign is ever changed again, this must change with
-     * it. There is a check for exactly this in tools/selftest.js. */
-    return ((run.dir + 2) % 4) * (Math.PI / 2);
   };
 
   Corridor.prototype.cameraPos = function () {
@@ -313,43 +290,28 @@
 
   /* ---------------------------------------------------------- projection */
 
-  /* World point -> camera space. Kept separate from projection so that edges
-   * which straddle the camera can be CLIPPED rather than thrown away. */
   function toCamera(wx, wz, cam, sinY, cosY) {
     var dx = wx - cam.x, dz = wz - cam.z;
-    return {
-      /* Depth is the component of (point - camera) along the heading.
-       * Sign matters: with sin(-yaw) this is only correct when yaw is 0, so
-       * the very first run looked fine and every run after it had its entire
-       * geometry behind the camera - which is what was blacking out the
-       * screen after each turn. */
-      d: dz * cosY + dx * sinY,
-      l: dx * cosY - dz * sinY
-    };
+    return { d: dz * cosY + dx * sinY, l: dx * cosY - dz * sinY };
   }
 
   function projectCam(c, W, H, cameraDepth) {
     var scale = cameraDepth / c.d;
     return {
       x: W / 2 + scale * c.l * W / 2,
-      depth: c.d,
-      scale: scale,
-      /* y(h) = yA - yB*h.  W/2 on both axes keeps world proportions on a tall
-       * phone; using H/2 for the vertical stretches everything about 2x. */
+      d: c.d,
+      /* y(h) = yA - yB*h. W/2 on both axes keeps world proportions on a tall
+       * phone; using H/2 vertically stretches everything about twofold. */
       yA: H * HORIZON + scale * CAM_H * W / 2,
       yB: scale * W / 2
     };
   }
 
-  /* Clip a near->far edge against the near plane and project both ends.
-   *
-   * Without this, any wall slice with one end behind the camera is discarded
-   * whole, so the wall you are actually walking past vanishes, and standing at
-   * a junction - where EVERY point of the next run sits at depth zero - leaves
-   * a black screen. Clipping keeps the visible part of a straddling edge. */
-  function projectEdge(a, b, W, H, cameraDepth) {
-    var A = a, B = b;
-    if (A.d < NEAR && B.d < NEAR) return null;      // wholly behind
+  /* Project an edge, clipping against the near plane so a piece with one end
+   * behind the camera is SHORTENED rather than discarded. Returning null only
+   * when the whole edge is behind is what keeps the walls gap-free. */
+  function projectEdge(A, B, W, H, cameraDepth) {
+    if (A.d < NEAR && B.d < NEAR) return null;
     if (A.d < NEAR) {
       var ta = (NEAR - A.d) / (B.d - A.d);
       A = { d: NEAR, l: A.l + (B.l - A.l) * ta };
@@ -357,16 +319,22 @@
       var tb = (NEAR - B.d) / (A.d - B.d);
       B = { d: NEAR, l: B.l + (A.l - B.l) * tb };
     }
-    return { near: projectCam(A, W, H, cameraDepth), far: projectCam(B, W, H, cameraDepth) };
+    return {
+      near: projectCam(A, W, H, cameraDepth),
+      far: projectCam(B, W, H, cameraDepth)
+    };
   }
 
-  function projectPoint(wx, wz, cam, sinY, cosY, W, H, cameraDepth) {
-    var c = toCamera(wx, wz, cam, sinY, cosY);
-    if (c.d < NEAR) return null;
-    return projectCam(c, W, H, cameraDepth);
+  function heights(P, HAUNT) {
+    return {
+      floor: P.yA,
+      skirt: P.yA - P.yB * HAUNT.HEIGHTS.skirt,
+      dado: P.yA - P.yB * HAUNT.HEIGHTS.dado,
+      rail: P.yA - P.yB * HAUNT.HEIGHTS.rail,
+      cornice: P.yA - P.yB * HAUNT.HEIGHTS.cornice,
+      top: P.yA - P.yB * WALL_H
+    };
   }
-
-  function yAt(P, h) { return P.yA - P.yB * h; }
 
   function quad(g, ax, ay, bx, by, cx, cy, dx, dy, fill) {
     g.fillStyle = fill;
@@ -376,390 +344,165 @@
     g.fill();
   }
 
+  function fogAt(depth) {
+    var f = 1 - depth / FAR;
+    return f <= 0 ? 0 : Math.pow(f, 1.4);
+  }
+
   /* -------------------------------------------------------------- render */
+
+  /* The runs whose geometry can be on screen: the one the camera is in, one
+   * behind (seen through the corner just passed) and one ahead (swinging in
+   * during a pivot). Bounded, and independent of maze size. */
+  Corridor.prototype.nearbyRuns = function (out) {
+    var n = this.runs.length;
+    out[0] = (this.runIdx - 1 + n) % n;
+    out[1] = this.runIdx;
+    out[2] = (this.runIdx + 1) % n;
+    return out;
+  };
+
+  var RUNS_SCRATCH = [0, 0, 0];
 
   Corridor.prototype.draw = function (g, W, H, t) {
     var HAUNT = SB.HAUNTED;
-    if (!HAUNT) return;
+    if (!HAUNT || !this.geo) return;
 
     var cam = this.cameraPos();
     var sinY = Math.sin(this.yaw), cosY = Math.cos(this.yaw);
-    var pts = this.points;
+    var runsNear = this.nearbyRuns(RUNS_SCRATCH);
+    var i, j, s;
 
-    var run = this.runs[this.runIdx];
-    /* WHERE THE WALK STARTS - AND WHY IT MUST NOT BRANCH ON `turning`.
-     *
-     * Looking back down the run, the points in view are the ones with a LOWER
-     * index, so the walk runs down the array. The anchor is the camera's own
-     * position along the path plus a small lookahead, so the nearest slice
-     * always has a partner to pair with.
-     *
-     * This used to switch to a different anchor the moment a pivot began,
-     * which swapped the entire set of drawn geometry in ONE frame. Because
-     * the camera has eased almost to a standstill by then, the surrounding
-     * frames differ by 1 or 2 units and that one differed by 45 - a hard
-     * visual cut, landing exactly as the turn started.
-     *
-     * So the anchor is continuous instead. During the pivot it SLIDES forward
-     * into the next run by (1 + 2*ROAD_W/SEG_LEN) points, eased on the same
-     * curve as the yaw. That constant is not a guess: it is exactly the gap
-     * between where this run's anchor ends and where the next run's anchor
-     * begins, so the anchor is continuous at BOTH ends of the turn.
-     */
-    var prevIdx = (this.runIdx - 1 + this.runs.length) % this.runs.length;
-    var nextIdx = (this.runIdx + 1) % this.runs.length;
-    var nextRun = this.runs[nextIdx];
-    var contiguous = nextRun.startPoint > run.startPoint;
-
-    var camPt = run.startPoint + this.along / SEG_LEN;
-    if (this.turning && contiguous) {
-      var tp = Math.min(1, this.turnT / TURN_TIME);
-      camPt += smoothstep(tp) * (1 + 2 * ROAD_W / SEG_LEN);
-    }
-    var startIdx = Math.floor(camPt) + 2;
-
-    /* BUDGET ONLY WHAT CAN ACTUALLY BE SEEN.
-     *
-     * The walk used to take exactly DRAW_DIST points regardless of whether
-     * they were in front of the camera. During a pivot the anchor slides
-     * forward into the next hallway, and those points sit BEHIND a
-     * backward-facing camera. They get dropped later by the near-plane clip,
-     * but they have already consumed the budget - measured at the end of a
-     * turn: 53 of 60 slices discarded, 2 drawn. The wall simply stopped
-     * existing, which is what showed as black boxes.
-     *
-     * So the budget now counts only slices with something in front of the
-     * camera, and the walk is allowed to look further back to find them. The
-     * hard cap keeps it bounded. */
-    var frames = [];
-    var usable = 0;
-    for (var n = 0; n < DRAW_DIST * 3 && usable < DRAW_DIST; n++) {
-      var pi = startIdx - n;
-      if (pi < 0) break;
-      var P = pts[pi];
-      if (P.run !== this.runIdx && P.run !== prevIdx &&
-          !(contiguous && P.run === nextIdx)) break;
-      var d = DIR4[P.dir];
-      /* wall lines either side of the centre, perpendicular to the run */
-      var rxw = P.x + d.dz * ROAD_W, rzw = P.z - d.dx * ROAD_W;
-      var lxw = P.x - d.dz * ROAD_W, lzw = P.z + d.dx * ROAD_W;
-
-      /* At a run end the corridor opens into the junction; the wall you see
-       * is its FAR side, half a corridor width beyond the vertex. Projecting
-       * it at the vertex itself puts it at zero distance, where it clips away
-       * and leaves a black hole in the middle of the turn. */
-      var endP = null;
-      if (P.isEnd) {
-        endP = {
-          C: projectPoint(P.x + d.dx * ROAD_W, P.z + d.dz * ROAD_W, cam, sinY, cosY, W, H, this.cameraDepth),
-          L: projectPoint(P.x + d.dx * ROAD_W - d.dz * ROAD_W, P.z + d.dz * ROAD_W + d.dx * ROAD_W, cam, sinY, cosY, W, H, this.cameraDepth),
-          R: projectPoint(P.x + d.dx * ROAD_W + d.dz * ROAD_W, P.z + d.dz * ROAD_W - d.dx * ROAD_W, cam, sinY, cosY, W, H, this.cameraDepth)
-        };
-        if (!endP.C || !endP.L || !endP.R) endP = null;
+    /* ---- floors, far to near ------------------------------------------ */
+    var floors = this._floorBuf;
+    floors.length = 0;
+    for (i = 0; i < runsNear.length; i++) {
+      var fspan = this.floorSpans[runsNear[i]];
+      if (!fspan) continue;
+      for (j = fspan.from; j <= fspan.to && floors.length < MAX_FLOORS; j++) {
+        var fq = this.geo.floors[j];
+        var q0 = toCamera(fq.p[0].x, fq.p[0].z, cam, sinY, cosY);
+        var q1 = toCamera(fq.p[1].x, fq.p[1].z, cam, sinY, cosY);
+        var q2 = toCamera(fq.p[2].x, fq.p[2].z, cam, sinY, cosY);
+        var q3 = toCamera(fq.p[3].x, fq.p[3].z, cam, sinY, cosY);
+        var dMin = Math.min(q0.d, q1.d, q2.d, q3.d);
+        if (dMin > FAR) continue;
+        var eN = projectEdge(q0, q1, W, H, this.cameraDepth);
+        var eF = projectEdge(q3, q2, W, H, this.cameraDepth);
+        if (!eN || !eF) continue;
+        floors.push({ q: fq, eN: eN, eF: eF, depth: (q0.d + q1.d + q2.d + q3.d) * 0.25 });
       }
-      /* Camera space only. Projection happens per EDGE in the pair loop, so
-       * a slice with one end behind the camera can be clipped instead of
-       * discarded. */
-      var fC = toCamera(P.x, P.z, cam, sinY, cosY);
-      var fL = toCamera(lxw, lzw, cam, sinY, cosY);
-      var fR = toCamera(rxw, rzw, cam, sinY, cosY);
-      if (fC.d > NEAR || fL.d > NEAR || fR.d > NEAR) usable++;
-      frames.push({ P: P, n: frames.length, cC: fC, cL: fL, cR: fR, endP: endP });
+    }
+    floors.sort(byDepthDesc);
+
+    /* Ceiling first, from the same plan at WALL_H. Flat colour only - it is
+     * barely lit and nothing is mounted on it, so it costs one quad each. */
+    for (i = 0; i < floors.length; i++) {
+      var cl2 = floors[i];
+      var cfog = fogAt(cl2.depth);
+      if (cfog <= 0.01) continue;
+      var cnL = cl2.eN.near, cnR = cl2.eN.far, cfL = cl2.eF.near, cfR = cl2.eF.far;
+      quad(g,
+        cnL.x, cnL.yA - cnL.yB * WALL_H, cnR.x, cnR.yA - cnR.yB * WALL_H,
+        cfR.x, cfR.yA - cfR.yB * WALL_H, cfL.x, cfL.yA - cfL.yB * WALL_H,
+        HAUNT.hsl(HAUNT.PALETTE.cornice, cfog, cl2.q.band ? -13 : -10));
     }
 
-    /* Turn a pair of frames into projected near/far points for one line of the
-     * corridor, clipped against the near plane. */
-    var self = this;
-    function edge(nr, f, key) {
-      return projectEdge(nr[key], f[key], W, H, self.cameraDepth);
-    }
-    function heights(P) {
-      return {
-        floor: yAt(P, 0),
-        skirt: yAt(P, HAUNT.HEIGHTS.skirt),
-        dado: yAt(P, HAUNT.HEIGHTS.dado),
-        rail: yAt(P, HAUNT.HEIGHTS.rail),
-        cornice: yAt(P, HAUNT.HEIGHTS.cornice),
-        top: yAt(P, WALL_H)
-      };
-    }
-
-    for (var i = frames.length - 1; i > 0; i--) {
-      var f = frames[i], nrf = frames[i - 1];
-      if (!f || !nrf) continue;
-      /* Never span a corner: the two points belong to different runs and the
-       * quad between them would shear across the turn. */
-      if (f.P.run !== nrf.P.run) continue;
-
-      var fog = Math.pow(1 - (f.n / DRAW_DIST), 1.7);
-      if (fog <= 0.01) continue;
-
-      /* Project this slice's three lines, clipped to the near plane. */
-      var eC = edge(nrf, f, 'cC'), eL = edge(nrf, f, 'cL'), eR = edge(nrf, f, 'cR');
-      if (!eC || !eL || !eR) continue;
-
-      var nr = { L: eL.near, R: eR.near, C: eC.near, ys: heights(eC.near) };
-      nr.w = Math.abs(eR.near.x - eL.near.x) / 2;
-      var ff = { L: eL.far, R: eR.far, C: eC.far, ys: heights(eC.far) };
-      /* `f` keeps its P/n/endP; give it the projected geometry too */
-      var fcam = { cC: f.cC, cL: f.cL, cR: f.cR };
-      f = { P: f.P, n: f.n, endP: f.endP, cC: fcam.cC, cL: fcam.cL, cR: fcam.cR,
-            L: ff.L, R: ff.R, C: ff.C, ys: ff.ys };
-
-      var band = f.P.band;
-
-      /* WHEN A SLICE IS TOO CLOSE TO DRESS.
-       *
-       * Wall slices are clipped against the near plane, so a slice with one
-       * end behind the camera still draws - correctly - as a stretched quad.
-       * The panelling copes with that because it is flat colour. The wall
-       * DRESSING does not: a painting is a dark canvas inside a frame, and
-       * stretching that trapezoid across a clipped slice paints a large
-       * near-black rectangle over the wall. Those are the black boxes that
-       * appear during a turn, when the camera swings close to the corner.
-       *
-       * So dressing is skipped on any slice that is clipped or has blown up
-       * on screen. The wall itself still draws; it just stays plain for the
-       * frame or two where a picture could not be drawn honestly. */
-      var nearestDepth = Math.min(nrf.cC.d, nrf.cL.d, nrf.cR.d, f.cC.d, f.cL.d, f.cR.d);
-      var span = Math.max(Math.abs(nr.L.x - f.L.x), Math.abs(nr.R.x - f.R.x));
-      var dressable = nearestDepth > NEAR * 2.5 && span < W * 1.5;
-
-      var detail = f.n < 26;
-
-      /* floorboards */
-      quad(g, nr.L.x, nr.ys.floor, nr.R.x, nr.ys.floor,
-        f.R.x, f.ys.floor, f.L.x, f.ys.floor,
-        HAUNT.hsl(band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, fog));
-
-      /* the runner goes down over the boards, leaving a margin of bare wood */
-      if (SB.CARPET) SB.CARPET.draw(g, nr, f, fog, f.P.run * 1000 + f.P.i);
-
-      if (detail) {
-        g.strokeStyle = HAUNT.hsl(HAUNT.PALETTE.joint, 0.8 * fog);
-        g.lineWidth = Math.max(0.5, nr.w * 0.012);
-        g.beginPath();
-        for (var bd = 0; bd < 7; bd++) {
-          var p2 = (bd + 0.5) / 7;
-          g.moveTo(nr.L.x + (nr.R.x - nr.L.x) * p2, nr.ys.floor);
-          g.lineTo(f.L.x + (f.R.x - f.L.x) * p2, f.ys.floor);
-        }
-        g.stroke();
+    for (i = 0; i < floors.length; i++) {
+      var fl = floors[i];
+      var ffog = fogAt(fl.depth);
+      if (ffog <= 0.01) continue;
+      var nL = fl.eN.near, nR = fl.eN.far;
+      var fL = fl.eF.near, fR = fl.eF.far;
+      quad(g, nL.x, nL.yA, nR.x, nR.yA, fR.x, fR.yA, fL.x, fL.yA,
+        HAUNT.hsl(fl.q.band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, ffog));
+      if (SB.CARPET && !fl.q.junction) {
+        SB.CARPET.draw(g,
+          { L: { x: nL.x }, R: { x: nR.x }, ys: { floor: nL.yA } },
+          { L: { x: fL.x }, R: { x: fR.x }, ys: { floor: fL.yA } },
+          ffog, fl.q.run * 1000 + fl.q.k);
       }
+    }
 
-      /* walls */
-      if (detail) {
-        HAUNT.wallSlice(g, nr.L.x, f.L.x, nr.ys, f.ys, fog, band, 'left', true);
-        HAUNT.wallSlice(g, nr.R.x, f.R.x, nr.ys, f.ys, fog, band, 'right', true);
-      } else {
-        quad(g, nr.L.x, nr.ys.floor, f.L.x, f.ys.floor, f.L.x, f.ys.top, nr.L.x, nr.ys.top,
-          HAUNT.hsl(HAUNT.PALETTE.paper, fog, -4));
-        quad(g, nr.R.x, nr.ys.floor, f.R.x, f.ys.floor, f.R.x, f.ys.top, nr.R.x, nr.ys.top,
-          HAUNT.hsl(HAUNT.PALETTE.paper, fog, 0));
-      }
-
-      /* wall dressing */
-      if (detail && dressable && f.P.feature) {
-        var ft = f.P.feature;
-        var fn = HAUNT.FEATURES[ft.kind];
-        if (fn) {
-          var isL = ft.side === 'left';
-          var wnx = isL ? nr.L.x : nr.R.x, wfx = isL ? f.L.x : f.R.x;
-          /* screen side, not world side - see the note on furniture below */
-          fn(g, wnx, wfx, nr.ys, f.ys, fog, t, ft.phase,
-            wnx < nr.C.x ? 'left' : 'right');
+    /* ---- walls, far to near ------------------------------------------- */
+    var walls = this._wallBuf;
+    walls.length = 0;
+    for (i = 0; i < runsNear.length; i++) {
+      for (s = 0; s < 2; s++) {
+        var span = this.wallSpans[(s ? 'right' : 'left') + ':' + runsNear[i]];
+        if (!span) continue;
+        for (j = span.from; j <= span.to && walls.length < MAX_WALLS; j++) {
+          var w = this.geo.walls[j];
+          var a = toCamera(w.x1, w.z1, cam, sinY, cosY);
+          var b = toCamera(w.x2, w.z2, cam, sinY, cosY);
+          if (Math.min(a.d, b.d) > FAR) continue;
+          var e = projectEdge(a, b, W, H, this.cameraDepth);
+          if (!e) continue;
+          walls.push({ w: w, e: e, depth: Math.max(a.d, b.d) });
         }
       }
+    }
+    walls.sort(byDepthDesc);
 
-      /* furniture */
-      if (detail && dressable && f.n >= 4 && f.P.furn && SB.FURNITURE) {
-        var fu = f.P.furn;
-        var piece = SB.FURNITURE.PIECES[fu.kind];
+    for (i = 0; i < walls.length; i++) {
+      var it = walls[i];
+      var wfog = fogAt(it.depth);
+      if (wfog <= 0.01) continue;
+
+      var pn = it.e.near, pf = it.e.far;
+      var ysN = heights(pn, HAUNT), ysF = heights(pf, HAUNT);
+      var detail = it.depth < FAR * 0.5;
+
+      HAUNT.wallSlice(g, pn.x, pf.x, ysN, ysF, wfog, it.w.band, it.w.side, detail);
+
+      /* Dressing is skipped on a piece whose near end is clipped or which has
+       * blown up on screen. A painting is a dark canvas inside a frame, and
+       * stretching that trapezoid across a clipped piece paints a black
+       * rectangle onto the wall. The wall itself still draws; it just stays
+       * plain for the frame or two involved. */
+      var dressable = detail && pn.d > NEAR * 2.5 &&
+                      Math.abs(pn.x - pf.x) < W * 1.5;
+      if (!dressable) continue;
+
+      if (it.w.feature) {
+        var fn = HAUNT.FEATURES[it.w.feature.kind];
+        if (fn) fn(g, pn.x, pf.x, ysN, ysF, wfog, t, it.w.feature.phase, it.w.side);
+      }
+      if (it.w.furn && SB.FURNITURE) {
+        var piece = SB.FURNITURE.PIECES[it.w.furn.kind];
         if (piece) {
-          var l2 = fu.side === 'left';
-          var pnx = fu.centre ? nr.C.x : (l2 ? nr.L.x : nr.R.x);
-          var pfx = fu.centre ? f.C.x : (l2 ? f.L.x : f.R.x);
-          /* INWARD COMES FROM THE PROJECTION, NOT THE LABEL.
-           * fu.side is fixed when the track is built and describes world
-           * space. Which side of the SCREEN that wall lands on depends on
-           * which way the camera faces, so a hard-coded +1/-1 silently
-           * inverts the moment the facing changes and every piece of
-           * furniture gets pushed into the wall instead of into the room.
-           * Taking the sign from the projected centre cannot go wrong. */
           piece(g, {
-            nx: pnx, fx: pfx,
-            nF: nr.C, fF: f.C,
-            nw: nr.w, fog: fog, t: t, phase: fu.phase,
-            inward: nr.C.x >= pnx ? 1 : -1,
-            centreX: nr.C.x
+            nx: pn.x, fx: pf.x, nF: pn, fF: pf,
+            nw: Math.abs(pn.x - pf.x) * 0.5 + 8,
+            fog: wfog, t: t, phase: it.w.furn.phase,
+            inward: it.w.side === 'left' ? 1 : -1,
+            centreX: (pn.x + pf.x) * 0.5
           });
         }
       }
-
-      /* THE END WALL. A run finishes in a solid face - the wall you would walk
-       * into if you missed the turn. With real geometry this is just the
-       * cross-section at the run's last point, and the camera pivot sweeps it
-       * out of frame instead of it vanishing sideways. */
-      if (f.P.i === 0) this.junctionAt(g, f.P, cam, sinY, cosY, W, H, fog, band);
-
-      /* dark ceiling line */
-      g.strokeStyle = 'rgba(8,6,14,' + (0.5 * fog) + ')';
-      g.lineWidth = Math.max(0.8, nr.w * 0.02);
-      g.beginPath();
-      g.moveTo(nr.L.x, nr.ys.top); g.lineTo(f.L.x, f.ys.top);
-      g.moveTo(nr.R.x, nr.ys.top); g.lineTo(f.R.x, f.ys.top);
-      g.stroke();
-    }
-
-    /* The junction you are standing in, last, so it sits on top of everything.
-     *
-     * Two different junctions can matter. The one at the FAR end of the run is
-     * the corner you came through, and caps the corridor so you are not
-     * looking into black where the previous hallway used to be drawn. The one
-     * at the NEAR end is the corner you are pivoting through right now; it is
-     * indexed against the NEXT run's first point, which this run's frames do
-     * not include, so it has to be drawn explicitly or the screen empties out
-     * mid-turn. */
-    for (var jn = Math.min(3, frames.length - 1); jn >= 0; jn--) {
-      var jf = frames[jn];
-      if (!jf || jf.P.i !== 0) continue;
-      this.junctionAt(g, jf.P, cam, sinY, cosY, W, H,
-        Math.pow(1 - (jf.n / DRAW_DIST), 1.7), jf.P.band);
-    }
-
-
-    for (var k = frames.length - 1; k >= 0; k--) {
-      var fr = frames[k];
-      if (fr && fr.P.hazard) this.drawHazard(g, fr, t, W, H);
+      if (it.w.hazard) this.drawHazard(g, it, ysN, wfog, t, W);
     }
   };
 
-  /* THE JUNCTION.
-   *
-   * Where two corridors meet there is a small square room. Two of its four
-   * sides are the openings you arrive through and leave by; the other two are
-   * solid, and they are the entire reason a pivot has anything to look at.
-   *
-   * Without them the camera sits at the vertex with both runs exactly edge-on
-   * - every point at depth zero - and the screen goes black for the whole
-   * turn. Modelling the two solid sides is what fixes that properly, rather
-   * than stretching a fake wall across the frame.
-   */
-  /* The junction at a run start joins the PREVIOUS run to this one. Arriving
-   * along the previous run's direction, leaving along this one's. */
-  Corridor.prototype.junctionAt = function (g, P, cam, sinY, cosY, W, H, fog, band) {
-    var prev = this.runs[(P.run - 1 + this.runs.length) % this.runs.length];
-    this.junction(g, { x: P.x, z: P.z, dir: prev.dir }, P.dir,
-      cam, sinY, cosY, W, H, fog, band);
-  };
-
-  Corridor.prototype.junction = function (g, P, nextDir, cam, sinY, cosY, W, H, fog, band) {
-    var HAUNT = SB.HAUNTED;
-    var A = DIR4[P.dir];
-    var Pa = { dx: A.dz, dz: -A.dx };          // perpendicular, to the right
-    var R = ROAD_W;
-    var self = this;
-
-    function corner(a, p) {
-      return { x: P.x + A.dx * R * a + Pa.dx * R * p, z: P.z + A.dz * R * a + Pa.dz * R * p };
-    }
-    var FL = corner(1, -1), FR = corner(1, 1);
-    var NL = corner(-1, -1), NR = corner(-1, 1);
-
-    /* Which way out? +Pa is a right turn, -Pa a left one. */
-    var B = DIR4[nextDir];
-    var turningRight = (B.dx * Pa.dx + B.dz * Pa.dz) > 0;
-
-    /* Always the wall straight ahead, plus whichever side is not the exit. */
-    var walls = [[FL, FR, 'left']];
-    walls.push(turningRight ? [FL, NL, 'left'] : [FR, NR, 'right']);
-
-    function heights(Q) {
-      return {
-        floor: Q.yA,
-        skirt: Q.yA - Q.yB * HAUNT.HEIGHTS.skirt,
-        dado: Q.yA - Q.yB * HAUNT.HEIGHTS.dado,
-        rail: Q.yA - Q.yB * HAUNT.HEIGHTS.rail,
-        cornice: Q.yA - Q.yB * HAUNT.HEIGHTS.cornice,
-        top: Q.yA - Q.yB * WALL_H
-      };
-    }
-
-    for (var i = 0; i < walls.length; i++) {
-      var w = walls[i];
-      var e = projectEdge(
-        toCamera(w[0].x, w[0].z, cam, sinY, cosY),
-        toCamera(w[1].x, w[1].z, cam, sinY, cosY),
-        W, H, self.cameraDepth);
-      if (!e) continue;
-      var hn = heights(e.near), hf = heights(e.far);
-      /* floor of the junction */
-      g.fillStyle = HAUNT.hsl(HAUNT.PALETTE.floor, fog);
-      HAUNT.wallSlice(g, e.near.x, e.far.x, hn, hf, fog, band, w[2], true);
-    }
-
-    /* a portrait on the wall you would walk into */
-    var eF = projectEdge(
-      toCamera(FL.x, FL.z, cam, sinY, cosY),
-      toCamera(FR.x, FR.z, cam, sinY, cosY),
-      W, H, this.cameraDepth);
-    if (eF) {
-      var h2 = heights(eF.near);
-      var ww = Math.abs(eF.far.x - eF.near.x);
-      if (ww > 26) {
-        var pw = ww * 0.4, ph = (h2.rail - h2.cornice) * 0.5;
-        var pcx = (eF.near.x + eF.far.x) / 2, pcy = (h2.rail + h2.cornice) / 2;
-        g.fillStyle = HAUNT.hsl(HAUNT.PALETTE.gilt, fog, -12);
-        g.fillRect(pcx - pw / 2, pcy - ph / 2, pw, ph);
-        g.fillStyle = 'hsla(20,30%,9%,' + fog + ')';
-        g.fillRect(pcx - pw * 0.38, pcy - ph * 0.38, pw * 0.76, ph * 0.76);
-        g.fillStyle = 'hsla(34,22%,60%,' + (0.8 * fog) + ')';
-        g.beginPath();
-        g.ellipse(pcx, pcy - ph * 0.06, pw * 0.2, ph * 0.24, 0, 0, Math.PI * 2);
-        g.fill();
-      }
-    }
-  };
-
-  Corridor.prototype.drawHazard = function (g, fr, t, W, H) {
+  Corridor.prototype.drawHazard = function (g, it, ysN, fog, t, W) {
     var THEME = SB.THEME;
-    var h = fr.P.hazard, hz = h.hz;
-    var fog = Math.pow(1 - (fr.n / DRAW_DIST), 1.5);
-    if (fog <= 0.02 || fr.n < 4) return;
-    if (fr.cC.d < NEAR) return;
-    var HAUNT = SB.HAUNTED;
-    var C = projectCam(fr.cC, W, H, this.cameraDepth);
-    var L = projectCam(fr.cL.d < NEAR ? fr.cC : fr.cL, W, H, this.cameraDepth);
-    var R = projectCam(fr.cR.d < NEAR ? fr.cC : fr.cR, W, H, this.cameraDepth);
-    fr = { P: fr.P, n: fr.n, C: C, L: L, R: R, w: Math.abs(R.x - L.x) / 2,
-      ys: { floor: C.yA, cornice: C.yA - C.yB * HAUNT.HEIGHTS.cornice } };
+    var hz = it.w.hazard.hz;
+    var pn = it.e.near, pf = it.e.far;
+    var size = Math.min(Math.abs(pn.x - pf.x) * 0.45, W * 0.10);
+    if (size < 2) return;
 
-    var size = Math.min(fr.w * 0.28, W * 0.11);
-    if (size < 1.5) return;
-
-    var px, py;
-    if (h.side === 'floor') { px = fr.C.x; py = fr.ys.floor - size * 0.15; }
-    else if (h.side === 'float') {
-      px = fr.C.x + Math.sin(t * 1.4 + h.phase) * fr.w * 0.3;
-      py = fr.ys.floor + (fr.ys.cornice - fr.ys.floor) * 0.55;
-    } else {
-      px = h.side === 'left' ? fr.L.x : fr.R.x;
-      py = fr.ys.floor + (fr.ys.cornice - fr.ys.floor) * h.lift;
-    }
-
+    var px = (pn.x + pf.x) * 0.5;
+    var py = ysN.floor + (ysN.cornice - ysN.floor) * it.w.hazard.lift;
     var hue = hz.fx && hz.fx.rainbow ? (t * 90) % 360 : hz.hue;
-    var pulse = 0.7 + Math.sin(t * 5 + h.phase) * 0.3;
+    var pulse = 0.7 + Math.sin(t * 5 + it.w.hazard.phase) * 0.3;
 
     g.save();
     g.globalAlpha = fog;
     g.shadowColor = THEME.sig(0.9);
-    g.shadowBlur = Math.min(26, size * 0.9);
+    g.shadowBlur = Math.min(24, size);
     g.fillStyle = THEME.hue(hue, 85, 56, 0.96);
     g.beginPath(); g.arc(px, py, size, 0, Math.PI * 2); g.fill();
-    g.restore();
-
-    g.save();
-    g.globalAlpha = fog;
+    g.shadowBlur = 0;
     g.strokeStyle = THEME.sig(0.95, 8);
     g.lineWidth = Math.max(1, size * 0.16);
     g.beginPath(); g.arc(px, py, size, 0, Math.PI * 2); g.stroke();
@@ -768,22 +511,19 @@
     grd.addColorStop(1, THEME.sig(0, 0));
     g.fillStyle = grd;
     g.beginPath(); g.arc(px, py, size * 0.8, 0, Math.PI * 2); g.fill();
-    g.restore();
-
-    if (size > 11 && hz.glyph) {
-      g.save();
-      g.globalAlpha = fog;
+    if (size > 10 && hz.glyph) {
       g.font = '700 ' + (size * 0.9) + 'px system-ui, sans-serif';
       g.textAlign = 'center'; g.textBaseline = 'middle';
       g.fillStyle = 'rgba(12,10,26,0.75)';
       g.fillText(hz.glyph, px, py + size * 0.04);
-      g.restore();
     }
+    g.restore();
   };
 
   global.SB = global.SB || {};
   global.SB.Corridor = Corridor;
   global.SB.CORRIDOR_CONST = {
-    SEG_LEN: SEG_LEN, ROAD_W: ROAD_W, WALL_H: WALL_H, TURN_TIME: TURN_TIME
+    SEG_LEN: SEG_LEN, ROAD_W: ROAD_W, WALL_H: WALL_H,
+    TURN_TIME: TURN_TIME, SPEED: SPEED, FAR: FAR
   };
 })(window);

@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const CACHE = 'wonky-boy-v7';
+const CACHE = 'wonky-boy-v8';
 
 const ASSETS = [
   './',
@@ -24,6 +24,7 @@ const ASSETS = [
   './js/furniture.js',
   './js/paintings.js',
   './js/carpet.js',
+  './js/maze3d.js',
   './js/corridor.js',
   './js/splash.js',
   './js/backbutton.js',

@@ -175,41 +175,62 @@ try {
   require(path.join(JS, 'paintings.js'));
   require(path.join(JS, 'carpet.js'));
   require(path.join(JS, 'furniture.js'));
+  require(path.join(JS, 'maze3d.js'));
   require(path.join(JS, 'corridor.js'));
 
+  /* The wall boundary is one closed polyline per side. If consecutive pieces
+   * ever stop meeting exactly, corners leak and black gaps appear - which is
+   * the entire class of bug this architecture exists to make impossible. */
   const C = new SB.Corridor('selftest');
+  let gaps = 0, worstGap = 0;
+  for (const side of ['left', 'right']) {
+    const w = C.geo.walls.filter(p2 => p2.side === side);
+    for (let i = 1; i < w.length; i++) {
+      const d = Math.hypot(w[i].x1 - w[i-1].x2, w[i].z1 - w[i-1].z2);
+      if (d > 0.001) { gaps++; worstGap = Math.max(worstGap, d); }
+    }
+  }
+  check('wall boundary is closed end to end', gaps === 0,
+    gaps + ' discontinuities, worst ' + worstGap.toFixed(3) + ' units');
+
+  /* Camera heading must agree with the projection's sign convention. These
+   * disagreed once, and the symptom was that north/south hallways rendered
+   * while east/west ones drew nothing at all. */
   const dirsSeen = new Set();
-  let behind = 0, checked = 0;
+  let starved = 0, checked = 0;
   for (let r = 0; r < 16; r++) {
     while (C.turning) C.advance(1 / 60);
     for (let k = 0; k < 40; k++) C.advance(1 / 60);
-    const run = C.runs[C.runIdx];
     const cam = C.cameraPos();
-    /* the same convention toCamera() uses in corridor.js */
     const sinY = Math.sin(C.yaw), cosY = Math.cos(C.yaw);
-    const P = C.points[run.startPoint + Math.max(0, Math.floor(C.along / 200) - 3)];
-    const depth = (P.z - cam.z) * cosY + (P.x - cam.x) * sinY;
-    dirsSeen.add(run.dir);
+    const span = C.wallSpans['left:' + C.runIdx];
+    let inFront = 0;
+    for (let j = span.from; j <= span.to; j++) {
+      const w = C.geo.walls[j];
+      const d = (w.z1 - cam.z) * cosY + (w.x1 - cam.x) * sinY;
+      if (d > 60) inFront++;
+    }
+    dirsSeen.add(C.runs[C.runIdx].dir);
     checked++;
-    if (depth <= 0) behind++;
+    if (inFront < 5) starved++;
     while (!C.turning) C.advance(1 / 60);
   }
-  check('corridor renders in every direction', behind === 0,
-    behind + ' of ' + checked + ' runs had geometry behind the camera');
+  check('every hallway has wall in front of the camera', starved === 0,
+    starved + ' of ' + checked + ' runs drew almost nothing');
   check('all four compass directions exercised', dirsSeen.size === 4,
     [...dirsSeen].sort().join(','));
 
   const C2 = new SB.Corridor('cadence');
   let turns = 0, frames = 0, turning = 0, was = false;
-  for (let f = 0; f < 60 * 40; f++) {
+  for (let f = 0; f < 60 * 60; f++) {
     C2.advance(1 / 60);
     frames++;
     if (C2.turning) turning++;
     if (C2.turning && !was) turns++;
     was = C2.turning;
   }
-  const gap = 40 / turns;
-  check('corners are seconds apart, not fractions', gap > 1.8 && gap < 4.5, gap.toFixed(2) + 's apart');
+  const gap = 60 / turns;
+  check('corners are seconds apart, not fractions', gap > 2 && gap < 4.5, gap.toFixed(2) + 's apart');
   check('most of the time is spent going straight', turning / frames < 0.25,
     Math.round(100 * turning / frames) + '% turning');
   check('speed eases through corners', (function () {
@@ -218,6 +239,26 @@ try {
     for (let f = 0; f < 60 * 20; f++) { C3.advance(1 / 60); const v = C3.speedFactor || 1; min = Math.min(min, v); max = Math.max(max, v); }
     return min < 0.4 && max > 0.95;
   })(), 'slows into the apex, returns to full on the straight');
+
+  /* Play Store builds run on modest hardware: per-frame work must not scale
+   * with maze size. */
+  check('per-frame geometry is bounded', (function () {
+    const C4 = new SB.Corridor('bounded');
+    let worst = 0;
+    for (let f = 0; f < 60 * 30; f++) {
+      C4.advance(1 / 60);
+      const runs = C4.nearbyRuns([0, 0, 0]);
+      let n = 0;
+      for (const r of runs) {
+        for (const side of ['left', 'right']) {
+          const sp = C4.wallSpans[side + ':' + r];
+          if (sp) n += (sp.to - sp.from + 1);
+        }
+      }
+      worst = Math.max(worst, n);
+    }
+    return worst < 700;
+  })(), 'candidate walls per frame stay in the low hundreds');
 } catch (e) {
   failures++;
   console.log('  FAIL corridor checks threw -> ' + e.message);
