@@ -26,6 +26,7 @@
     highest: 1,          // highest board unlocked
     deaths: 0,
     clears: 0,
+    trinkets: 0,
     best: {},            // board -> best seconds
     seen: {},            // hazard key -> 1
     reduceMotion: false
@@ -43,6 +44,7 @@
       save.highest = Math.max(1, Math.min(TOTAL, d.highest | 0 || 1));
       save.deaths = d.deaths | 0;
       save.clears = d.clears | 0;
+      save.trinkets = d.trinkets | 0;
       save.best = d.best || {};
       save.seen = d.seen || {};
       save.variant = d.variant === 'girl' ? 'girl' : 'boy';
@@ -247,6 +249,14 @@
     state.board = Math.max(1, Math.min(TOTAL, n));
     state.maze = MAZE.build(state.board);
     state.player = new SB.Player(state.maze);
+    state.rooms = new SB.Rooms(state);
+    state.rooms.onWin = function (room, game) {
+      /* A trinket and nothing else. Rooms deliberately hand out no speed, no
+       * shield and no shortcut - see the note in minigames.js. */
+      save.trinkets = (save.trinkets | 0) + 1;
+      writeSave();
+      showBanner(game.name, 'Trinket found');
+    };
     state.player.hooksOwner = state;
     state.temp = [];
     state.pulls = [];
@@ -353,6 +363,7 @@
       onStumble: state.hooks.onStumble
     });
     ENTITIES.cellContacts(state);
+    if (state.rooms) state.rooms.update(dt);
 
     /* Reached the exit? */
     var ex = state.maze.exit.x + 0.5, ey = state.maze.exit.y + 0.5;
@@ -539,6 +550,7 @@
       : 'Board 1 of ' + TOTAL;
     el.titleSeen.textContent = Object.keys(save.seen).length + ' / ' + HAZ.count;
     el.titleDeaths.textContent = save.deaths;
+    if (el.titleTrinkets) el.titleTrinkets.textContent = save.trinkets | 0;
     el.playBtn.textContent = save.highest > 1 ? 'Continue - board ' + save.highest : 'Start wobbling';
   }
 
@@ -598,7 +610,7 @@
       'complete', 'completeBoard', 'completeTime', 'completeBest', 'completeNext',
       'title', 'levels', 'codex', 'pause', 'playUi', 'levelGrid', 'levelPage',
       'levelPrev', 'levelNext', 'codexList', 'codexCount', 'titleProgress',
-      'titleSeen', 'titleDeaths', 'playBtn'].forEach(function (id) {
+      'titleSeen', 'titleDeaths', 'titleTrinkets', 'playBtn'].forEach(function (id) {
         el[id] = document.getElementById(id);
       });
   }

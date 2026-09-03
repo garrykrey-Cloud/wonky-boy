@@ -269,7 +269,7 @@
 
   /* ----------------------------------------------------- hazard placement */
 
-  function placeHazards(cfg, cells, rng, startIdx, exitIdx) {
+  function placeHazards(cfg, cells, rng, startIdx, exitIdx, roomAt) {
     var w = cfg.w, h = cfg.h, len = w * h;
     var pool = HAZ.availableFor(cfg.board);
     var placed = [];
@@ -311,6 +311,8 @@
 
       var idx = rng.int(0, len - 1);
       if (safe[idx] || occupied[idx]) continue;
+      /* rooms belong to their mini-game; no loose hazards inside one */
+      if (roomAt && roomAt[idx] !== -1) continue;
 
       var ent = buildEntity(hz, cfg, cells, rng, idx, w, h);
       if (!ent) continue;
@@ -342,6 +344,7 @@
         var zhz = zapPool[rng.int(0, zapPool.length - 1)];
         var zi = rng.int(0, len - 1);
         if (safe[zi] || occupied[zi]) continue;
+        if (roomAt && roomAt[zi] !== -1) continue;
         var zent = buildEntity(zhz, cfg, cells, rng, zi, w, h);
         if (!zent) continue;
         lethal[zi] = 1;
@@ -435,6 +438,113 @@
     return ent;
   }
 
+  /* ---------------------------------------------------------------- rooms
+   *
+   * Four to six open rooms are cut into every board. Walking into one blows
+   * it up to fill the screen and starts a mini-game; the exits stay usable
+   * throughout, so a room can always be walked straight through.
+   *
+   * Carving only ever REMOVES walls, so it can add connectivity but never
+   * take it away - a board that was solvable before is still solvable after,
+   * which is why this runs after the maze is carved and braided rather than
+   * being woven into generation.
+   *
+   * Rooms keep clear of the start, the exit and the board edge, and never
+   * touch each other, so two rooms cannot merge into one cavern.
+   */
+  function carveRooms(cfg, cells, rng, startIdx, exitIdx, games) {
+    var w = cfg.w, h = cfg.h;
+    var rooms = [];
+    var roomAt = new Int16Array(w * h).fill(-1);
+    if (!games || !games.length) return { rooms: rooms, roomAt: roomAt };
+
+    /* Small boards get small rooms, or there would be no maze left. */
+    var maxSide = Math.max(3, Math.min(4, Math.floor(Math.min(w, h) / 4)));
+    var want = rng.int(4, 6);
+    var sx = startIdx % w, sy = (startIdx / w) | 0;
+    var ex = exitIdx % w, ey = (exitIdx / w) | 0;
+
+    var tries = 400;
+    while (rooms.length < want && tries-- > 0) {
+      var rw = rng.int(3, maxSide);
+      var rh = rng.int(3, maxSide);
+      if (rw + 4 >= w || rh + 4 >= h) continue;
+      var x0 = rng.int(1, w - rw - 2);
+      var y0 = rng.int(1, h - rh - 2);
+
+      /* A one-cell moat around the room keeps rooms apart and stops a room
+       * swallowing the start or the exit. */
+      var clash = false;
+      for (var yy = y0 - 1; yy <= y0 + rh && !clash; yy++) {
+        for (var xx = x0 - 1; xx <= x0 + rw; xx++) {
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          var ci = yy * w + xx;
+          if (roomAt[ci] !== -1) { clash = true; break; }
+          if (ci === startIdx || ci === exitIdx) { clash = true; break; }
+          if (Math.abs(xx - sx) + Math.abs(yy - sy) < 3) { clash = true; break; }
+          if (Math.abs(xx - ex) + Math.abs(yy - ey) < 3) { clash = true; break; }
+        }
+      }
+      if (clash) continue;
+
+      var id = rooms.length;
+      var list = [];
+      var x, y, i, d;
+
+      /* Open the interior: drop every wall between two cells of the room. */
+      for (y = y0; y < y0 + rh; y++) {
+        for (x = x0; x < x0 + rw; x++) {
+          i = y * w + x;
+          roomAt[i] = id;
+          list.push(i);
+          for (d = 0; d < 4; d++) {
+            var nx = x + DIRS[d].dx, ny = y + DIRS[d].dy;
+            if (nx < x0 || ny < y0 || nx >= x0 + rw || ny >= y0 + rh) continue;
+            cells[i] &= ~DIRS[d].bit;
+            cells[ny * w + nx] &= ~DIRS[d].opp;
+          }
+        }
+      }
+
+      /* Count the ways out that the maze already gave us, and cut more if
+       * there are fewer than two - a room with one door is a dead end, and a
+       * room with none is a sealed box the player can never reach. */
+      var exits = [];
+      var candidates = [];
+      for (y = y0; y < y0 + rh; y++) {
+        for (x = x0; x < x0 + rw; x++) {
+          i = y * w + x;
+          for (d = 0; d < 4; d++) {
+            var ox = x + DIRS[d].dx, oy = y + DIRS[d].dy;
+            if (ox < 0 || oy < 0 || ox >= w || oy >= h) continue;
+            if (ox >= x0 && oy >= y0 && ox < x0 + rw && oy < y0 + rh) continue;
+            if (cells[i] & DIRS[d].bit) candidates.push({ i: i, d: d, o: oy * w + ox });
+            else exits.push({ i: i, d: d, o: oy * w + ox });
+          }
+        }
+      }
+      rng.shuffle(candidates);
+      while (exits.length < 2 && candidates.length) {
+        var c = candidates.pop();
+        cells[c.i] &= ~DIRS[c.d].bit;
+        cells[c.o] &= ~DIRS[c.d].opp;
+        exits.push(c);
+      }
+
+      rooms.push({
+        id: id,
+        x0: x0, y0: y0, w: rw, h: rh,
+        cx: x0 + rw / 2, cy: y0 + rh / 2,
+        cells: list,
+        exits: exits.map(function (e) { return { from: e.i, to: e.o, dir: e.d }; }),
+        game: games[rng.int(0, games.length - 1)],
+        cleared: false
+      });
+    }
+
+    return { rooms: rooms, roomAt: roomAt };
+  }
+
   /* ------------------------------------------------------------- assembly */
 
   function build(boardNumber) {
@@ -448,7 +558,10 @@
     var startIdx = 0;                 // top-left
     var exitIdx = pickExit(cfg, cells, rng, startIdx);
 
-    var hazards = placeHazards(cfg, cells, rng, startIdx, exitIdx);
+    var games = (SB.MINIGAMES && SB.MINIGAMES.keys) ? SB.MINIGAMES.keys() : [];
+    var roomInfo = carveRooms(cfg, cells, rng, startIdx, exitIdx, games);
+
+    var hazards = placeHazards(cfg, cells, rng, startIdx, exitIdx, roomInfo.roomAt);
 
     /* Cell lookup so the physics step only tests what is underfoot. */
     var byCell = new Array(w * h);
@@ -477,6 +590,8 @@
       exit: { x: exitIdx % w, y: (exitIdx / w) | 0, idx: exitIdx },
       hazards: hazards,
       byCell: byCell,
+      rooms: roomInfo.rooms,
+      roomAt: roomInfo.roomAt,
       wallHaz: wallHaz,
       solution: solution,
       /* Which hazard types this board actually contains - used for the

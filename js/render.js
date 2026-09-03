@@ -269,6 +269,24 @@
     this.camX = player.x;
     this.camY = player.y;
 
+    /* ...except inside a mini-game room, where the camera lets go of him and
+     * eases onto the room instead, zooming until the room fills the view.
+     *
+     * This is the entire room effect. The maze is untouched: the same cells,
+     * the same walls, the same exits, all still working. Only the framing
+     * changes, which is why walking out of a room can never break - there is
+     * no second world to keep in step, just one world and two framings with a
+     * blend between them. */
+    var frame = state.rooms && state.rooms.framing ? state.rooms.framing() : null;
+    if (frame) {
+      var fitX = W / (frame.spanX * scale);
+      var fitY = H / (frame.spanY * scale);
+      var roomScale = scale * Math.min(fitX, fitY);
+      scale = scale + (roomScale - scale) * frame.blend;
+      this.camX = player.x + (frame.cx - player.x) * frame.blend;
+      this.camY = player.y + (frame.cy - player.y) * frame.blend;
+    }
+
     var shake = player.shake;
     var sx = shake ? (Math.random() - 0.5) * shake * 16 : 0;
     var sy = shake ? (Math.random() - 0.5) * shake * 16 : 0;
@@ -301,6 +319,9 @@
     if (player.revealed > 0) this.drawSolution(g, maze, t);
     this.drawTemp(g, state);
     this.drawHazards(g, state, t, scale);
+    /* The encounter draws between the hazards and the boy, in cell units, so
+     * it sits on the floor of the room and he walks over the top of it. */
+    if (state.rooms) state.rooms.draw(g, t);
     this.drawPlayer(g, state, t);
 
     g.restore();

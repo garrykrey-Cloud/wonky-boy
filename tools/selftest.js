@@ -106,6 +106,50 @@ check('every board has a lethal-free route with a one-cell margin', noMargin ===
 check('board generation is fast', buildMs < 4000, buildMs + 'ms for 1000 boards');
 
 const b1 = MAZE.boardConfig(1), b1000 = MAZE.boardConfig(1000);
+console.log('\nMini-game rooms');
+try {
+  require(path.join(JS, 'minigames.js'));
+  const MG = SB.MINIGAMES;
+  check('mini-games are registered', MG.count >= 10,
+    MG.count + ' built of the 100 designed');
+  check('every mini-game honours the full contract',
+    MG.LIST.every(m => m.key && m.name && m.goal &&
+      typeof m.init === 'function' && typeof m.update === 'function' &&
+      typeof m.draw === 'function' && typeof m.status === 'function'));
+
+  let roomTotal = 0, minRooms = 99, maxRooms = 0;
+  let badExits = 0, overlaps = 0, hazardsInRooms = 0, unsolvable = 0;
+  for (let n = 1; n <= 1000; n++) {
+    const m = MAZE.build(n);
+    const rooms = m.rooms || [];
+    roomTotal += rooms.length;
+    minRooms = Math.min(minRooms, rooms.length);
+    maxRooms = Math.max(maxRooms, rooms.length);
+    if (!m.solution.length) unsolvable++;
+    for (const r of rooms) {
+      if (r.exits.length < 2) badExits++;
+      if (r.cells.includes(m.start.idx) || r.cells.includes(m.exit.idx)) overlaps++;
+    }
+    if (m.hazards.some(h => h.behavior !== 'wall' && m.roomAt[h.cell] !== -1)) {
+      hazardsInRooms++;
+    }
+  }
+  check('every board has four to six rooms', minRooms >= 4 && maxRooms <= 6,
+    minRooms + ' to ' + maxRooms + ', averaging ' + (roomTotal / 1000).toFixed(1));
+  /* A one-exit room is a dead end and a no-exit room cannot be reached at
+   * all - either would strand the player, so this is the one that matters. */
+  check('every room has at least two ways out', badExits === 0, badExits + ' bad');
+  check('rooms never swallow the start or the exit', overlaps === 0, overlaps + ' bad');
+  check('loose hazards stay out of rooms', hazardsInRooms === 0,
+    hazardsInRooms + ' boards');
+  /* Carving a room only ever removes walls, so it can add connectivity but
+   * never take it away. This proves that held across all 1000 boards. */
+  check('carving rooms never breaks a board', unsolvable === 0, unsolvable + ' unsolvable');
+} catch (e) {
+  failures++;
+  console.log('  FAIL room checks threw -> ' + e.message);
+}
+
 console.log('\nSloppiness');
 check('board 1 base randomness is 10%', Math.abs(b1.baseSlop - 0.10) < 1e-9, b1.baseSlop);
 check('board 1000 base randomness is 35%', Math.abs(b1000.baseSlop - 0.35) < 1e-9, b1000.baseSlop);
