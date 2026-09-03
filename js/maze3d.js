@@ -127,8 +127,18 @@
 
   /* Floor: a quad per run slice, plus a square at every junction so the corner
    * floor is covered too. Slight overlap at the corners is harmless - it is
-   * the same carpet either way - and it guarantees no bare patches. */
-  function floors(runs, cl, R, SEG_LEN) {
+   * the same carpet either way - and it guarantees no bare patches.
+   *
+   * OVERSIZE. The floor and ceiling are laid wider than the corridor, by
+   * FLOOR_OVERHANG. The walls are drawn after them and are opaque, so the
+   * excess is invisible everywhere it matters - except in the near field,
+   * where a 100 degree field of view sees past the wall line entirely and the
+   * bottom corners of the screen would otherwise show empty backdrop. This is
+   * cheaper and steadier than narrowing the lens. */
+  var FLOOR_OVERHANG = 1.9;
+
+  function floors(runs, cl, R0, SEG_LEN) {
+    var R = R0 * FLOOR_OVERHANG;
     var out = [];
     var i, k;
     for (i = 0; i < runs.length; i++) {

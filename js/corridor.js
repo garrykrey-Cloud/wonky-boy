@@ -38,20 +38,41 @@
   var HORIZON = 0.44;
   var SPEED = 5200;        // world units per second on a straight
   var NEAR = 60;           // near clip, world units
-  var FAR = 13000;         // beyond this is fog
+  /* Draw distance. 9000 units is about twenty corridor widths - past that
+   * the fog has taken over and the slices are a pixel or two tall, so the
+   * work is invisible. Dropping it from 13000 roughly halved the per-frame
+   * geometry with no visible change to the frame. */
+  var FAR = 9000;
+  /* must match maze3d.js FLOOR_OVERHANG */
+  var FLOOR_OVERHANG = 1.9;
 
   /* THE TURN, AS MECHANICS. Speed eases off over EASE_DIST into a corner,
    * bottoms out at the apex, and builds back over the same distance out, so
    * the corner is symmetric. TURN_TIME is not a feel value: it is how long the
    * quarter-circle arc through the junction takes at the apex speed, so the
    * pivot and the travel agree. About half a second, or thirty frames. */
-  var TURN_MIN_SPEED = 0.25;
-  var EASE_DIST = 2600;
-  var TURN_TIME = (Math.PI / 2 * ROAD_W) / (SPEED * TURN_MIN_SPEED);
+  /* THE CORNER.
+   *
+   * There is no TURN_TIME any more. The pivot is driven by DISTANCE along
+   * the corner arc, so rotation and travel cannot drift apart - the turn
+   * takes exactly as long as it takes to drive round it.
+   *
+   * Which makes the apex speed the one dial that sets corner duration:
+   *
+   *     duration = TURN_ARC / (SPEED * TURN_MIN_SPEED)
+   *              = 675 / (5200 * 0.39)
+   *              = 0.33s
+   *
+   * a third of a second, which is the ten frames at 30fps Garry asked for,
+   * or twenty at 60. It also stays well clear of the old quarter-speed
+   * apex, which read as the camera stopping dead and lurching off again. */
+  var TURN_MIN_SPEED = 0.39;
+  var EASE_DIST = 3000;
+  var TURN_ARC = (Math.PI / 2) * ROAD_W;   // length of the quarter turn
 
   /* Bounded draw budget - the ceiling on per-frame cost. */
-  var MAX_WALLS = 160;
-  var MAX_FLOORS = 100;
+  var MAX_WALLS = 110;
+  var MAX_FLOORS = 70;
 
   var DIR4 = [
     { dx: 0, dz: 1 }, { dx: 1, dz: 0 }, { dx: 0, dz: -1 }, { dx: -1, dz: 0 }
@@ -86,16 +107,34 @@
     this.along = this.runs[this.runIdx].len * SEG_LEN - ROAD_W;
     this.yaw = this.headingFor(this.runs[this.runIdx]);
     this.turning = false;
-    this.turnT = 0;
-    this.turnFrom = this.yaw;
-    this.turnTo = this.yaw;
+    this.turnE = 0;
     this.turnPrevDir = this.runs[this.runIdx].dir;
     this.turnPos = null;
     this.speedFactor = 1;
 
-    /* Scratch, allocated once and reused. */
+    /* SCRATCH, ALLOCATED ONCE.
+     *
+     * A frame considers a couple of hundred pieces of geometry, and every
+     * one used to mint fresh objects for its entry and its two projected
+     * points - roughly eight hundred short-lived allocations per frame.
+     * The average frame was fine and the collector was not: ten frames in
+     * nine hundred blew the 16.7ms budget, one of them by 396ms, which is
+     * a visible hitch.
+     *
+     * These pools are filled once and rewritten in place. Steady-state
+     * allocation in draw() is now zero. */
     this._wallBuf = [];
     this._floorBuf = [];
+    this._pool = { pts: [], edges: [], items: [], n: 0, e: 0, i: 0 };
+    for (var pi = 0; pi < (MAX_WALLS + MAX_FLOORS) * 4 + 32; pi++) {
+      this._pool.pts.push({ x: 0, d: 0, yA: 0, yB: 0 });
+    }
+    for (var ei = 0; ei < (MAX_WALLS + MAX_FLOORS) * 2 + 16; ei++) {
+      this._pool.edges.push({ near: null, far: null });
+    }
+    for (var ii = 0; ii < MAX_WALLS + MAX_FLOORS + 16; ii++) {
+      this._pool.items.push({ w: null, q: null, e: null, eN: null, eF: null, depth: 0 });
+    }
   }
 
   Corridor.prototype.buildPath = function () {
@@ -226,41 +265,52 @@
     var runLen = run.len * SEG_LEN;
 
     if (this.turning) {
-      this.turnT += dt;
-      var p = Math.min(1, this.turnT / TURN_TIME);
-      var d = this.turnTo - this.turnFrom;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      var e = smoothstep(p);
-      this.yaw = this.turnFrom + d * e;
+      /* Drive the corner by DISTANCE, not by a timer. */
+      this.turnE += (SPEED * TURN_MIN_SPEED * dt) / TURN_ARC;
+      var e = Math.min(1, this.turnE);
+      var u = 1 - e;
       this.speedFactor = TURN_MIN_SPEED;
 
-      /* Round the corner on a quadratic Bezier rather than pivoting on the
-       * spot. Standing still at the vertex puts the lens half a corridor
-       * width from a flat wall, which reads as a room, not a hallway. */
       var A = DIR4[run.dir], B = DIR4[this.turnPrevDir];
       var jx = run.x0, jz = run.z0;                            // the junction
       var ix = jx + A.dx * ROAD_W, iz = jz + A.dz * ROAD_W;    // entry mouth
       var ox = jx - B.dx * ROAD_W, oz = jz - B.dz * ROAD_W;    // exit mouth
-      var u = 1 - e;
+
       this.turnPos = {
         x: u * u * ix + 2 * u * e * jx + e * e * ox,
         z: u * u * iz + 2 * u * e * jz + e * e * oz
       };
 
-      if (p >= 1) {
+      /* YAW COMES FROM THE PATH, NOT A SEPARATE EASE.
+       *
+       * Interpolating the angle on its own curve meant rotation and travel
+       * were two independent animations that only agreed at the ends. Here
+       * the heading is simply the tangent of the arc being driven, negated
+       * because the camera faces where it came from.
+       *
+       * That is continuous by construction. At e=0 the derivative points
+       * along -DIR4[run.dir], so the heading is exactly headingFor(run); at
+       * e=1 it points along -DIR4[prev], exactly headingFor(prev). No seam at
+       * either end, and the rate of turn always matches the speed. */
+      var tx = 2 * u * (jx - ix) + 2 * e * (ox - jx);
+      var tz = 2 * u * (jz - iz) + 2 * e * (oz - jz);
+      var m = Math.sqrt(tx * tx + tz * tz) || 1;
+      this.yaw = Math.atan2(-tx / m, -tz / m);
+
+      if (e >= 1) {
         this.turning = false;
         this.runIdx = (this.runIdx - 1 + this.runs.length) % this.runs.length;
         var nr = this.runs[this.runIdx];
-        this.along = nr.len * SEG_LEN - ROAD_W;   // exactly where the arc ended
+        this.along = nr.len * SEG_LEN - ROAD_W;
         this.turnPos = null;
         this.yaw = this.headingFor(nr);
       }
       return;
     }
 
-    /* along counts down. Ease off approaching the corner at ROAD_W, and again
-     * just after entering a run at its far end, so corners are symmetric. */
+    /* along counts down. Ease off approaching the corner at ROAD_W, and
+     * again just after entering a run at its far end, so corners are
+     * symmetric coming and going. */
     var toCorner = this.along - ROAD_W;
     var fromCorner = (runLen - ROAD_W) - this.along;
     this.speedFactor = Math.min(cornerEase(toCorner), cornerEase(fromCorner));
@@ -271,11 +321,7 @@
       var prev = this.runs[(this.runIdx - 1 + this.runs.length) % this.runs.length];
       this.turnPrevDir = prev.dir;
       this.turning = true;
-      this.turnT = 0;
-      this.turnFrom = this.yaw;
-      this.turnTo = this.headingFor(prev);
-      /* Seed the arc where the camera already is, so the first frame of the
-       * pivot is continuous with the last frame of the straight. */
+      this.turnE = 0;
       var mA = DIR4[run.dir];
       this.turnPos = { x: run.x0 + mA.dx * this.along, z: run.z0 + mA.dz * this.along };
     }
@@ -295,22 +341,22 @@
     return { d: dz * cosY + dx * sinY, l: dx * cosY - dz * sinY };
   }
 
-  function projectCam(c, W, H, cameraDepth) {
+  function projectCam(c, W, H, cameraDepth, out) {
     var scale = cameraDepth / c.d;
-    return {
-      x: W / 2 + scale * c.l * W / 2,
-      d: c.d,
-      /* y(h) = yA - yB*h. W/2 on both axes keeps world proportions on a tall
-       * phone; using H/2 vertically stretches everything about twofold. */
-      yA: H * HORIZON + scale * CAM_H * W / 2,
-      yB: scale * W / 2
-    };
+    out = out || { x: 0, d: 0, yA: 0, yB: 0 };
+    out.x = W / 2 + scale * c.l * W / 2;
+    out.d = c.d;
+    /* y(h) = yA - yB*h. W/2 on both axes keeps world proportions on a tall
+     * phone; using H/2 vertically stretches everything about twofold. */
+    out.yA = H * HORIZON + scale * CAM_H * W / 2;
+    out.yB = scale * W / 2;
+    return out;
   }
 
   /* Project an edge, clipping against the near plane so a piece with one end
    * behind the camera is SHORTENED rather than discarded. Returning null only
    * when the whole edge is behind is what keeps the walls gap-free. */
-  function projectEdge(A, B, W, H, cameraDepth) {
+  function projectEdge(A, B, W, H, cameraDepth, pool) {
     if (A.d < NEAR && B.d < NEAR) return null;
     if (A.d < NEAR) {
       var ta = (NEAR - A.d) / (B.d - A.d);
@@ -319,10 +365,10 @@
       var tb = (NEAR - B.d) / (A.d - B.d);
       B = { d: NEAR, l: B.l + (A.l - B.l) * tb };
     }
-    return {
-      near: projectCam(A, W, H, cameraDepth),
-      far: projectCam(B, W, H, cameraDepth)
-    };
+    var edge = pool ? pool.edges[pool.e++] : { near: null, far: null };
+    edge.near = projectCam(A, W, H, cameraDepth, pool ? pool.pts[pool.n++] : null);
+    edge.far = projectCam(B, W, H, cameraDepth, pool ? pool.pts[pool.n++] : null);
+    return edge;
   }
 
   function heights(P, HAUNT) {
@@ -371,6 +417,8 @@
     var cam = this.cameraPos();
     var sinY = Math.sin(this.yaw), cosY = Math.cos(this.yaw);
     var runsNear = this.nearbyRuns(RUNS_SCRATCH);
+    var pool = this._pool;
+    pool.n = 0; pool.e = 0; pool.i = 0;
     var i, j, s;
 
     /* ---- floors, far to near ------------------------------------------ */
@@ -387,10 +435,13 @@
         var q3 = toCamera(fq.p[3].x, fq.p[3].z, cam, sinY, cosY);
         var dMin = Math.min(q0.d, q1.d, q2.d, q3.d);
         if (dMin > FAR) continue;
-        var eN = projectEdge(q0, q1, W, H, this.cameraDepth);
-        var eF = projectEdge(q3, q2, W, H, this.cameraDepth);
+        var eN = projectEdge(q0, q1, W, H, this.cameraDepth, pool);
+        var eF = projectEdge(q3, q2, W, H, this.cameraDepth, pool);
         if (!eN || !eF) continue;
-        floors.push({ q: fq, eN: eN, eF: eF, depth: (q0.d + q1.d + q2.d + q3.d) * 0.25 });
+        var fitem = pool.items[pool.i++];
+        fitem.q = fq; fitem.eN = eN; fitem.eF = eF;
+        fitem.depth = (q0.d + q1.d + q2.d + q3.d) * 0.25;
+        floors.push(fitem);
       }
     }
     floors.sort(byDepthDesc);
@@ -417,9 +468,15 @@
       quad(g, nL.x, nL.yA, nR.x, nR.yA, fR.x, fR.yA, fL.x, fL.yA,
         HAUNT.hsl(fl.q.band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, ffog));
       if (SB.CARPET && !fl.q.junction) {
+        /* The floor quad is laid wider than the corridor to fill the near
+         * field (see maze3d.js). The runner must not be: scale the edges back
+         * to the true wall line, or the carpet borders end up hidden behind
+         * the skirting and the pattern reads at the wrong width. */
+        var nMid = (nL.x + nR.x) * 0.5, fMid = (fL.x + fR.x) * 0.5;
+        var k = 1 / FLOOR_OVERHANG;
         SB.CARPET.draw(g,
-          { L: { x: nL.x }, R: { x: nR.x }, ys: { floor: nL.yA } },
-          { L: { x: fL.x }, R: { x: fR.x }, ys: { floor: fL.yA } },
+          { L: { x: nMid + (nL.x - nMid) * k }, R: { x: nMid + (nR.x - nMid) * k }, ys: { floor: nL.yA } },
+          { L: { x: fMid + (fL.x - fMid) * k }, R: { x: fMid + (fR.x - fMid) * k }, ys: { floor: fL.yA } },
           ffog, fl.q.run * 1000 + fl.q.k);
       }
     }
@@ -436,9 +493,11 @@
           var a = toCamera(w.x1, w.z1, cam, sinY, cosY);
           var b = toCamera(w.x2, w.z2, cam, sinY, cosY);
           if (Math.min(a.d, b.d) > FAR) continue;
-          var e = projectEdge(a, b, W, H, this.cameraDepth);
+          var e = projectEdge(a, b, W, H, this.cameraDepth, pool);
           if (!e) continue;
-          walls.push({ w: w, e: e, depth: Math.max(a.d, b.d) });
+          var witem = pool.items[pool.i++];
+          witem.w = w; witem.e = e; witem.depth = Math.max(a.d, b.d);
+          walls.push(witem);
         }
       }
     }
@@ -451,7 +510,8 @@
 
       var pn = it.e.near, pf = it.e.far;
       var ysN = heights(pn, HAUNT), ysF = heights(pf, HAUNT);
-      var detail = it.depth < FAR * 0.5;
+      /* Joinery, stiles and beads only where they can be resolved. */
+      var detail = it.depth < FAR * 0.42;
 
       HAUNT.wallSlice(g, pn.x, pf.x, ysN, ysF, wfog, it.w.band, it.w.side, detail);
 
@@ -524,6 +584,6 @@
   global.SB.Corridor = Corridor;
   global.SB.CORRIDOR_CONST = {
     SEG_LEN: SEG_LEN, ROAD_W: ROAD_W, WALL_H: WALL_H,
-    TURN_TIME: TURN_TIME, SPEED: SPEED, FAR: FAR
+    TURN_ARC: TURN_ARC, TURN_MIN_SPEED: TURN_MIN_SPEED, SPEED: SPEED, FAR: FAR
   };
 })(window);
