@@ -458,16 +458,26 @@
     var roomAt = new Int16Array(w * h).fill(-1);
     if (!games || !games.length) return { rooms: rooms, roomAt: roomAt };
 
-    /* Small boards get small rooms, or there would be no maze left. */
-    var maxSide = Math.max(3, Math.min(4, Math.floor(Math.min(w, h) / 4)));
+    /* ROOM SHAPE FOLLOWS THE SCREEN.
+     *
+     * A room blown up to fill a portrait phone has to be portrait itself. A
+     * square room fitted to a 1:2 screen wastes half the height on dead bars,
+     * and no amount of zoom fixes that without cropping the exits off the
+     * sides. So rooms are built taller than they are wide, roughly matching
+     * the aspect they will be framed at.
+     *
+     * Both are still clamped to the board - a small early maze cannot afford
+     * a seven-cell room, and there would be no maze left around it. */
+    var maxW = Math.max(3, Math.min(4, Math.floor(w / 5)));
+    var maxH = Math.max(3, Math.min(7, Math.floor(h / 4)));
     var want = rng.int(4, 6);
     var sx = startIdx % w, sy = (startIdx / w) | 0;
     var ex = exitIdx % w, ey = (exitIdx / w) | 0;
 
     var tries = 400;
     while (rooms.length < want && tries-- > 0) {
-      var rw = rng.int(3, maxSide);
-      var rh = rng.int(3, maxSide);
+      var rw = rng.int(3, maxW);
+      var rh = rng.int(Math.min(4, maxH), maxH);
       if (rw + 4 >= w || rh + 4 >= h) continue;
       var x0 = rng.int(1, w - rw - 2);
       var y0 = rng.int(1, h - rh - 2);
