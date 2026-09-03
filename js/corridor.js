@@ -99,7 +99,7 @@
     this.runs = [];
     this.buildPath();
 
-    this.geo = SB.MAZE3D.build(this.runs, ROAD_W, SEG_LEN);
+    this.geo = SB.MAZE3D.build(this.runs, ROAD_W, SEG_LEN, this.rng);
     this.indexByRun();
     this.dress();
 
@@ -147,7 +147,10 @@
      * is invisible in a still and ruinous in motion; it once produced a corner
      * every 0.67 seconds, which never read as a hallway at all. */
     for (var r = 0; r < 26; r++) {
-      var len = rint(rng, 32, 54);
+      /* Corners should not arrive on a metronome. Most runs are long, but
+       * roughly one in three is short, so a couple of quick turns land
+       * back to back before it opens out into a long straight again. */
+      var len = rnd(rng) < 0.34 ? rint(rng, 13, 22) : rint(rng, 34, 60);
       this.runs.push({ dir: dir, len: len, x0: x, z0: z });
       x += DIR4[dir].dx * SEG_LEN * len;
       z += DIR4[dir].dz * SEG_LEN * len;
@@ -158,23 +161,25 @@
   /* Wall pieces are ordered along each boundary, so those belonging to a run
    * form a contiguous span. Recording the spans lets a frame consider only
    * the runs around the camera instead of the whole maze. */
+  /* Explicit index lists, not from/to ranges. Recess geometry is stored
+   * beside the run it belongs to, so "every piece between the first and
+   * last index of this run" would sweep in unrelated pieces. Lists cost a
+   * few thousand integers once and remove the ordering assumption. */
   Corridor.prototype.indexByRun = function () {
-    var spans = {}, i;
+    var lists = {}, i;
     for (i = 0; i < this.geo.walls.length; i++) {
       var w = this.geo.walls[i];
       var key = w.side + ':' + w.run;
-      if (!spans[key]) spans[key] = { from: i, to: i };
-      spans[key].to = i;
+      (lists[key] = lists[key] || []).push(i);
     }
-    this.wallSpans = spans;
+    this.wallIdx = lists;
 
-    var fs = {};
+    var fl = {};
     for (i = 0; i < this.geo.floors.length; i++) {
       var f = this.geo.floors[i];
-      if (!fs[f.run]) fs[f.run] = { from: i, to: i };
-      fs[f.run].to = i;
+      (fl[f.run] = fl[f.run] || []).push(i);
     }
-    this.floorSpans = fs;
+    this.floorIdx = fl;
   };
 
   Corridor.prototype.dress = function () {
@@ -425,10 +430,10 @@
     var floors = this._floorBuf;
     floors.length = 0;
     for (i = 0; i < runsNear.length; i++) {
-      var fspan = this.floorSpans[runsNear[i]];
-      if (!fspan) continue;
-      for (j = fspan.from; j <= fspan.to && floors.length < MAX_FLOORS; j++) {
-        var fq = this.geo.floors[j];
+      var flist = this.floorIdx[runsNear[i]];
+      if (!flist) continue;
+      for (var fj = 0; fj < flist.length && floors.length < MAX_FLOORS; fj++) {
+        var fq = this.geo.floors[flist[fj]];
         var q0 = toCamera(fq.p[0].x, fq.p[0].z, cam, sinY, cosY);
         var q1 = toCamera(fq.p[1].x, fq.p[1].z, cam, sinY, cosY);
         var q2 = toCamera(fq.p[2].x, fq.p[2].z, cam, sinY, cosY);
@@ -466,8 +471,9 @@
       var nL = fl.eN.near, nR = fl.eN.far;
       var fL = fl.eF.near, fR = fl.eF.far;
       quad(g, nL.x, nL.yA, nR.x, nR.yA, fR.x, fR.yA, fL.x, fL.yA,
-        HAUNT.hsl(fl.q.band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor, ffog));
-      if (SB.CARPET && !fl.q.junction) {
+        HAUNT.hsl(fl.q.band ? HAUNT.PALETTE.floorAlt : HAUNT.PALETTE.floor,
+          fl.q.stub ? ffog * 0.58 : ffog));
+      if (SB.CARPET && !fl.q.junction && !fl.q.stub) {
         /* The floor quad is laid wider than the corridor to fill the near
          * field (see maze3d.js). The runner must not be: scale the edges back
          * to the true wall line, or the carpet borders end up hidden behind
@@ -486,10 +492,13 @@
     walls.length = 0;
     for (i = 0; i < runsNear.length; i++) {
       for (s = 0; s < 2; s++) {
-        var span = this.wallSpans[(s ? 'right' : 'left') + ':' + runsNear[i]];
-        if (!span) continue;
-        for (j = span.from; j <= span.to && walls.length < MAX_WALLS; j++) {
-          var w = this.geo.walls[j];
+        var wlist = this.wallIdx[(s ? 'right' : 'left') + ':' + runsNear[i]];
+        if (!wlist) continue;
+        for (var wj = 0; wj < wlist.length && walls.length < MAX_WALLS; wj++) {
+          var w = this.geo.walls[wlist[wj]];
+          /* an opening is a hole: draw nothing, and let the recess behind it
+           * show through */
+          if (w.opening) continue;
           var a = toCamera(w.x1, w.z1, cam, sinY, cosY);
           var b = toCamera(w.x2, w.z2, cam, sinY, cosY);
           if (Math.min(a.d, b.d) > FAR) continue;
@@ -513,14 +522,18 @@
       /* Joinery, stiles and beads only where they can be resolved. */
       var detail = it.depth < FAR * 0.42;
 
-      HAUNT.wallSlice(g, pn.x, pf.x, ysN, ysF, wfog, it.w.band, it.w.side, detail);
+      /* Inside a recess it is darker, and nothing hangs on the walls of a
+       * doorway. Dimming it is also what makes the opening read as depth
+       * rather than a differently coloured panel. */
+      var lit = it.w.stub ? wfog * 0.58 : wfog;
+      HAUNT.wallSlice(g, pn.x, pf.x, ysN, ysF, lit, it.w.band, it.w.side, detail && !it.w.stub);
 
       /* Dressing is skipped on a piece whose near end is clipped or which has
        * blown up on screen. A painting is a dark canvas inside a frame, and
        * stretching that trapezoid across a clipped piece paints a black
        * rectangle onto the wall. The wall itself still draws; it just stays
        * plain for the frame or two involved. */
-      var dressable = detail && pn.d > NEAR * 2.5 &&
+      var dressable = detail && !it.w.stub && pn.d > NEAR * 2.5 &&
                       Math.abs(pn.x - pf.x) < W * 1.5;
       if (!dressable) continue;
 

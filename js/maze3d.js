@@ -175,7 +175,90 @@
     return out;
   }
 
-  function build(runs, R, SEG_LEN) {
+  /* --------------------------------------------------------- openings
+   *
+   * A corridor with nothing leading off it reads as a tube. These cut real
+   * holes in the wall boundary and build a short passage behind each one,
+   * so the boy genuinely passes side hallways and doorways rather than
+   * pictures of them.
+   *
+   * The opening is not a special case in the renderer: the wall pieces it
+   * covers are simply not drawn, and the passage behind is ordinary wall,
+   * floor and ceiling geometry that goes through the same pipeline. That is
+   * the same principle that fixed the corners - if it is a hole, model the
+   * hole, do not paint one on.
+   *
+   * A doorway is one piece wide with a shallow recess; a hallway is two
+   * pieces wide and runs deeper. Both are capped at the far end, so you
+   * see into them but never out of the maze. */
+  var DOOR_DEPTH = 620;
+  var HALL_DEPTH = 1500;
+
+  function cutOpenings(wallsBySide, cl, R, SEG_LEN, rng) {
+    var stubs = { left: {}, right: {}, floors: [] };
+
+    ["left", "right"].forEach(function (side) {
+      var byRun = wallsBySide[side];
+      Object.keys(byRun).forEach(function (runKey) {
+        var list = byRun[runKey];
+        var run = parseInt(runKey, 10);
+        stubs[side][run] = [];
+        /* Keep clear of both ends: an opening straddling a corner would
+         * punch through the mitre and leak out of the maze. */
+        var i = 4 + Math.floor(rng.next() * 6);
+        while (i < list.length - 5) {
+          var isHall = rng.next() < 0.45;
+          var span = isHall ? 2 : 1;
+          if (i + span > list.length - 5) break;
+          var depth = isHall ? HALL_DEPTH : DOOR_DEPTH;
+
+          var A = list[i];
+          var B = list[i + span - 1];
+          var n = normal(cl[Math.min(run, cl.length - 1)].dir, side);
+
+          var ax = A.x1, az = A.z1, bx = B.x2, bz = B.z2;
+          var apx = ax + n.x * depth, apz = az + n.z * depth;
+          var bpx = bx + n.x * depth, bpz = bz + n.z * depth;
+
+          for (var k = 0; k < span; k++) {
+            list[i + k].opening = true;
+            list[i + k].openKind = isHall ? "hall" : "door";
+          }
+
+          /* the two cheeks and the back wall of the recess */
+          var mk = function (x1, z1, x2, z2) {
+            return { x1: x1, z1: z1, x2: x2, z2: z2, side: side, run: run,
+                     band: 0, stub: true, kind: isHall ? "hall" : "door",
+                     feature: null, furn: null, hazard: null };
+          };
+          stubs[side][run].push(mk(ax, az, apx, apz));
+          stubs[side][run].push(mk(bpx, bpz, bx, bz));
+          stubs[side][run].push(mk(apx, apz, bpx, bpz));
+
+          /* floor and ceiling for the recess */
+          stubs.floors.push({
+            run: run, k: -2, band: 1, stub: true,
+            p: [ { x: ax, z: az }, { x: bx, z: bz },
+                 { x: bpx, z: bpz }, { x: apx, z: apz } ]
+          });
+
+          /* Spacing. At every seven-to-fourteen pieces the wall was more
+           * hole than wall and the corridor read as a dark colonnade. This
+           * gives one or two openings per run per side - often enough that
+           * something is always sliding past, rare enough that each one
+           * registers. */
+          i += span + 15 + Math.floor(rng.next() * 17);
+        }
+      });
+    });
+
+    return stubs;
+  }
+
+  var stubFloors = [];
+
+  function build(runs, R, SEG_LEN, rng) {
+    stubFloors = [];
     var cl = centreline(runs, SEG_LEN);
     var left = offsetPolyline(cl, 'left', R);
     var right = offsetPolyline(cl, 'right', R);
@@ -183,12 +266,30 @@
       centreline: cl,
       leftPoly: left,
       rightPoly: right,
-      walls: pieces(left, 'left', SEG_LEN).concat(pieces(right, 'right', SEG_LEN)),
+      walls: (function () {
+        var L = pieces(left, 'left', SEG_LEN);
+        var Rt = pieces(right, 'right', SEG_LEN);
+        var bySide = { left: {}, right: {} };
+        L.forEach(function (w) { (bySide.left[w.run] = bySide.left[w.run] || []).push(w); });
+        Rt.forEach(function (w) { (bySide.right[w.run] = bySide.right[w.run] || []).push(w); });
+        var st = rng ? cutOpenings(bySide, cl, R, SEG_LEN, rng) : { left: {}, right: {}, floors: [] };
+        stubFloors = st.floors;
+        var out = [];
+        ['left', 'right'].forEach(function (side) {
+          Object.keys(bySide[side]).map(Number).sort(function (a, b) { return a - b; })
+            .forEach(function (r) {
+              /* stubs sit next to their own run so the per-run spans stay
+               * contiguous and a frame can still cull by run */
+              out = out.concat(bySide[side][r], (st[side] && st[side][r]) || []);
+            });
+        });
+        return out;
+      })(),
       /* Floor and ceiling share the same plan; only the height differs. A
        * corridor is a closed tube, and without the lid everything above the
        * cornice is empty backdrop - which reads as a hole in the wall when
        * the camera is close to one, as it is through every corner. */
-      floors: floors(runs, cl, R, SEG_LEN)
+      floors: floors(runs, cl, R, SEG_LEN).concat(stubFloors)
     };
   }
 

@@ -184,13 +184,13 @@ try {
   const C = new SB.Corridor('selftest');
   let gaps = 0, worstGap = 0;
   for (const side of ['left', 'right']) {
-    const w = C.geo.walls.filter(p2 => p2.side === side);
+    const w = C.geo.walls.filter(p2 => p2.side === side && !p2.stub);
     for (let i = 1; i < w.length; i++) {
       const d = Math.hypot(w[i].x1 - w[i-1].x2, w[i].z1 - w[i-1].z2);
       if (d > 0.001) { gaps++; worstGap = Math.max(worstGap, d); }
     }
   }
-  check('wall boundary is closed end to end', gaps === 0,
+  check('main wall boundary is closed end to end', gaps === 0,
     gaps + ' discontinuities, worst ' + worstGap.toFixed(3) + ' units');
 
   /* Camera heading must agree with the projection's sign convention. These
@@ -203,10 +203,10 @@ try {
     for (let k = 0; k < 40; k++) C.advance(1 / 60);
     const cam = C.cameraPos();
     const sinY = Math.sin(C.yaw), cosY = Math.cos(C.yaw);
-    const span = C.wallSpans['left:' + C.runIdx];
+    const list = C.wallIdx['left:' + C.runIdx] || [];
     let inFront = 0;
-    for (let j = span.from; j <= span.to; j++) {
-      const w = C.geo.walls[j];
+    for (const idx of list) {
+      const w = C.geo.walls[idx];
       const d = (w.z1 - cam.z) * cosY + (w.x1 - cam.x) * sinY;
       if (d > 60) inFront++;
     }
@@ -231,6 +231,29 @@ try {
   }
   const gap = 60 / turns;
   check('corners are seconds apart, not fractions', gap > 2 && gap < 4.5, gap.toFixed(2) + 's apart');
+  /* Corners must not arrive on a metronome, and side passages must exist as
+   * real holes in the wall rather than painted ones. */
+  (function () {
+    const C5 = new SB.Corridor('variety');
+    const gaps = [];
+    let last = 0, clock = 0, was = false;
+    for (let f = 0; f < 60 * 180; f++) {
+      C5.advance(1 / 60); clock += 1 / 60;
+      if (C5.turning && !was) { if (last) gaps.push(clock - last); last = clock; }
+      was = C5.turning;
+    }
+    const lo = Math.min(...gaps), hi = Math.max(...gaps);
+    check('some corners arrive sooner than others', hi / lo > 1.8,
+      lo.toFixed(2) + 's to ' + hi.toFixed(2) + 's between corners');
+
+    const openings = C5.geo.walls.filter(w => w.opening);
+    const stubs = C5.geo.walls.filter(w => w.stub);
+    check('side passages are cut into the wall', openings.length > 40 && stubs.length > 80,
+      openings.length + ' openings, ' + stubs.length + ' recess pieces');
+    check('every opening has a recess behind it', stubs.length >= openings.length,
+      'recesses ' + stubs.length + ' vs openings ' + openings.length);
+  })();
+
   check('most of the time is spent going straight', turning / frames < 0.25,
     Math.round(100 * turning / frames) + '% turning');
   check('speed eases through corners', (function () {
@@ -251,8 +274,8 @@ try {
       let n = 0;
       for (const r of runs) {
         for (const side of ['left', 'right']) {
-          const sp = C4.wallSpans[side + ':' + r];
-          if (sp) n += (sp.to - sp.from + 1);
+          const sp = C4.wallIdx[side + ':' + r];
+          if (sp) n += sp.length;
         }
       }
       worst = Math.max(worst, n);
